@@ -89,6 +89,13 @@ make run
 
 ### Upstream, against a SoroTrail indexer
 
+**Example:** Start SoroVista in upstream mode against a SoroTrail indexer:
+
+```bash
+SOURCE_MODE=sorotrail SOROTRAIL_URL=http://your-sorotrail:8080 PORT=8080 go run ./cmd/sorovista
+```
+
+
 No database needed:
 
 ```sh
