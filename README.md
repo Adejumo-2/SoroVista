@@ -106,6 +106,13 @@ SOURCE_MODE=sorotrail SOROTRAIL_URL=http://your-sorotrail:8080 docker compose up
 
 ## Configuration
 
+**Example:** Set the network and start the service:
+
+```bash
+NETWORK=testnet PORT=8080 go run ./cmd/sorovista
+```
+
+
 All configuration comes from environment variables (see `.env.example`).
 SoroVista validates the variables its selected mode requires and fails at
 startup with a message naming both, rather than failing later on a request.
