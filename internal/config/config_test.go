@@ -2,6 +2,7 @@ package config
 
 import (
 	"log/slog"
+	"os"
 	"testing"
 	"time"
 
@@ -183,6 +184,16 @@ func TestLoad(t *testing.T) {
 			},
 		},
 		{
+			name: "empty log level leaves default info",
+			env: map[string]string{
+				"DATABASE_URL": "postgres://localhost/sorovista",
+				"LOG_LEVEL":    "",
+			},
+			check: func(t *testing.T, c Config) {
+				assert.Equal(t, slog.LevelInfo, c.LogLevel)
+			},
+		},
+		{
 			name: "invalid log level is rejected",
 			env: map[string]string{
 				"DATABASE_URL": "postgres://localhost/sorovista",
@@ -275,7 +286,6 @@ func TestParseLevel(t *testing.T) {
 		{name: "error lowercase", input: "error", want: slog.LevelError},
 		{name: "error uppercase", input: "ERROR", want: slog.LevelError},
 		{name: "error mixed case", input: "ErRoR", want: slog.LevelError},
-		{name: "empty string rejected", input: "", want: slog.LevelInfo, wantErr: `invalid LOG_LEVEL "" (want debug, info, warn or error)`},
 		{name: "unknown level rejected", input: "verbose", want: slog.LevelInfo, wantErr: `invalid LOG_LEVEL "verbose" (want debug, info, warn or error)`},
 		{name: "trace rejected", input: "trace", want: slog.LevelInfo, wantErr: `invalid LOG_LEVEL "trace" (want debug, info, warn or error)`},
 		{name: "critical rejected", input: "critical", want: slog.LevelInfo, wantErr: `invalid LOG_LEVEL "critical" (want debug, info, warn or error)`},
@@ -294,4 +304,29 @@ func TestParseLevel(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestGetenv(t *testing.T) {
+	const key = "SOROVISTA_TEST_GETENV"
+
+	t.Run("set variable overrides fallback", func(t *testing.T) {
+		t.Setenv(key, "configured")
+		assert.Equal(t, "configured", getenv(key, "fallback"))
+	})
+
+	t.Run("empty variable uses fallback", func(t *testing.T) {
+		t.Setenv(key, "")
+		assert.Equal(t, "fallback", getenv(key, "fallback"))
+	})
+
+	t.Run("unset variable uses fallback", func(t *testing.T) {
+		t.Setenv(key, "temp")
+		require.NoError(t, os.Unsetenv(key))
+		assert.Equal(t, "fallback", getenv(key, "fallback"))
+	})
+
+	t.Run("empty fallback stays empty", func(t *testing.T) {
+		t.Setenv(key, "")
+		assert.Equal(t, "", getenv(key, ""))
+	})
 }
