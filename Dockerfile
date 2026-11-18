@@ -12,7 +12,7 @@ RUN CGO_ENABLED=0 go build \
     -ldflags "-X github.com/sorotrail/sorovista/internal/buildinfo.Version=${VERSION} -X github.com/sorotrail/sorovista/internal/buildinfo.Commit=${COMMIT} -X github.com/sorotrail/sorovista/internal/buildinfo.Date=${DATE}" \
     -o /out/sorovista ./cmd/sorovista
 
-FROM alpine:3.20
+FROM alpine:3.24
 RUN adduser -D -H sorovista && apk add --no-cache ca-certificates
 USER sorovista
 COPY --from=build /out/sorovista /usr/local/bin/sorovista

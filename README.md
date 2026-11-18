@@ -80,6 +80,13 @@ WATCHED_CONTRACTS=CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC \
 
 ### Standalone, bare metal
 
+**Example:** Build and run SoroVista in standalone mode:
+
+```bash
+make run
+```
+
+
 ```sh
 docker compose up -d postgres     # or bring your own Postgres
 cp .env.example .env              # adjust as needed
