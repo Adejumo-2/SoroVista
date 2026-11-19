@@ -302,6 +302,53 @@ func TestPartialEventsEmptyState(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "No events match these filters")
 }
 
+// TestRouteEdgeCases covers the inputs at the edges of what the UI routes
+// accept: a query that trims to nothing, a contract ID of the right length but
+// the wrong prefix, and a limit one past the maximum. Each is handled before
+// the source is consulted, so a bad request never costs a backend call.
+func TestRouteEdgeCases(t *testing.T) {
+	tests := []struct {
+		name         string
+		target       string
+		wantStatus   int
+		wantLocation string
+		wantBody     string
+	}{
+		{
+			name:         "whitespace-only search routes to the contracts list",
+			target:       "/search?q=%20%09",
+			wantStatus:   http.StatusSeeOther,
+			wantLocation: "/contracts",
+		},
+		{
+			name:       "a 56-character ID with the wrong prefix is rejected",
+			target:     "/contracts/G" + strings.Repeat("A", 55),
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "Invalid contract ID",
+		},
+		{
+			name:       "a limit one above the maximum is rejected",
+			target:     "/partials/events?limit=201",
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "limit must be an integer in [1,200]",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := &fakeSource{status: source.Status{Healthy: true}}
+			rec := get(t, newTestServer(t, src), tt.target)
+			require.Equal(t, tt.wantStatus, rec.Code)
+			if tt.wantLocation != "" {
+				assert.Equal(t, tt.wantLocation, rec.Header().Get("Location"))
+			}
+			if tt.wantBody != "" {
+				assert.Contains(t, rec.Body.String(), tt.wantBody)
+			}
+		})
+	}
+}
+
 func TestUnknownPathRenders404(t *testing.T) {
 	src := &fakeSource{status: source.Status{Healthy: true}}
 
