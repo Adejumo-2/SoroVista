@@ -110,6 +110,16 @@ deleted, which is the best kind of contribution.
 - Update the README if you change configuration or the API surface.
 - Explain the why in the description. The what is visible in the diff.
 
+**Example:** check everything, then open a pull request that closes its issue:
+
+```sh
+git checkout -b feature/descending-pagination
+make fmt && make lint && make test
+git commit -m "sorotrailsource: add descending pagination"
+gh pr create --title "Add descending pagination" \
+  --body "Closes #123. Test output: make test-db passes against the compose Postgres."
+```
+
 ## Reporting bugs
 
 Please include the mode you were running (`SOURCE_MODE`), the network, and the
