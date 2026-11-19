@@ -37,6 +37,14 @@ func TestParseNetwork(t *testing.T) {
 		{"custom without passphrase",
 			map[string]string{"NETWORK": "custom", "RPC_URL": "http://localhost:8000"}, "", "", "", "NETWORK_PASSPHRASE is required"},
 		{"unknown network", map[string]string{"NETWORK": "regtest"}, "", "", "", "invalid NETWORK"},
+		// Edge cases: input normalization and explicitly empty overrides.
+		{"network name is trimmed and lowercased", map[string]string{"NETWORK": "  MaInNeT  "}, "mainnet",
+			"https://soroban-mainnet.stellar.org", rpc.PassphraseMainnet, ""},
+		{"whitespace-only network defaults to testnet", map[string]string{"NETWORK": " \t "}, "testnet",
+			"https://soroban-testnet.stellar.org", rpc.PassphraseTestnet, ""},
+		{"empty overrides keep preset values",
+			map[string]string{"NETWORK": "futurenet", "RPC_URL": "", "NETWORK_PASSPHRASE": ""}, "futurenet",
+			"https://rpc-futurenet.stellar.org", rpc.PassphraseFuturenet, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
