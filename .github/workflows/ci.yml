@@ -57,6 +57,20 @@ jobs:
         env:
           TEST_DATABASE_URL: postgres://sorovista:sorovista@localhost:5432/sorovista?sslmode=disable
 
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Fuzz golden deserializer
+        run: go test -fuzz=FuzzGoldenDeserializer -fuzztime=10s ./pkg/fuzz
+      - name: Fuzz template interpolation
+        run: go test -fuzz=FuzzInterpolate -fuzztime=10s ./pkg/fuzz
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 10
