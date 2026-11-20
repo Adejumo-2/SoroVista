@@ -39,6 +39,12 @@ SOURCE_MODE=sorotrail
 SOROTRAIL_URL=https://your-sorotrail-instance.example.com
 ```
 
+**Example:** restart SoroVista in upstream mode:
+
+```bash
+SOURCE_MODE=sorotrail SOROTRAIL_URL=https://your-sorotrail-instance.example.com make run
+```
+
 Switching modes changes where data comes from going forward — it doesn't migrate or merge history between the two. If you switch from standalone to upstream, you're now viewing SoroTrail's history, not a combination of both.
 
 ## Choosing at a glance
@@ -49,3 +55,13 @@ Switching modes changes where data comes from going forward — it doesn't migra
 | History depth | Bounded by RPC retention | As deep as SoroTrail's own history |
 | Simplest to start | ✅ | Needs SoroTrail already running |
 | Best for | Quick exploration, standalone deployments | Serious/production use alongside SoroTrail |
+
+**Example:** start SoroVista in either mode:
+
+```bash
+# Standalone (needs Postgres)
+SOURCE_MODE=rpc DATABASE_URL=postgres://sorovista:sorovista@localhost:5432/sorovista?sslmode=disable make run
+
+# Upstream (needs a running SoroTrail instance)
+SOURCE_MODE=sorotrail SOROTRAIL_URL=http://localhost:8080 make run
+```
