@@ -1,184 +1,207 @@
 package metrics
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func getCounterValue(m prometheus.Counter) float64 {
-	var pb dto.Metric
-	_ = m.Write(&pb)
-	if pb.Counter != nil {
-		return pb.Counter.GetValue()
-	}
-	return 0
+// scrape renders the registry through Handler, the same path Prometheus takes
+// in production, so every assertion below sees exactly what a real scraper
+// would receive. prometheus/testutil would be more convenient but pulls a new
+// module into go.mod for one test package, which is not worth it.
+func scrape(t *testing.T, m *Metrics) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	return rec.Body.String()
 }
 
-func getHistogramSampleCount(h prometheus.Observer) uint64 {
-	metric, ok := h.(prometheus.Metric)
-	if !ok {
-		return 0
-	}
-	var pb dto.Metric
-	_ = metric.Write(&pb)
-	if pb.Histogram != nil {
-		return pb.Histogram.GetSampleCount()
-	}
-	return 0
+// setRoutePattern swaps the package-level function variable for the duration of
+// one test and returns a restore function. Middleware calls RoutePattern
+// unguarded, so a test that drives it has to provide one; restoring it keeps
+// that requirement from leaking into tests that do not.
+func setRoutePattern(fn func(*http.Request) string) func() {
+	prev := RoutePattern
+	RoutePattern = fn
+	return func() { RoutePattern = prev }
 }
 
-func TestRecordEvents(t *testing.T) {
-	tests := []struct {
-		name      string
-		metrics   *Metrics
-		counts    []int64
-		wantTotal float64
+// The nil contract is what lets ingest.WithMetrics and the HTTP middleware be
+// wired unconditionally. Table-driven over the exported methods so a method
+// added later without its `if m == nil` guard is more likely to be caught here
+// than by a nil pointer dereference in production.
+func TestNilMetricsRecordsNothing(t *testing.T) {
+	var m *Metrics
+
+	calls := []struct {
+		name string
+		call func()
 	}{
-		{
-			name:      "happy path records positive event counts",
-			metrics:   New(),
-			counts:    []int64{5, 10, 1},
-			wantTotal: 16,
-		},
-		{
-			name:      "zero count adds nothing",
-			metrics:   New(),
-			counts:    []int64{0},
-			wantTotal: 0,
-		},
-		{
-			name:      "nil metrics receiver is a no-op",
-			metrics:   nil,
-			counts:    []int64{10, 20},
-			wantTotal: 0,
-		},
+		{"RecordPoll ok", func() { m.RecordPoll(true, 25*time.Millisecond) }},
+		{"RecordPoll error", func() { m.RecordPoll(false, 25*time.Millisecond) }},
+		{"SetLag", func() { m.SetLag(42) }},
+		{"TickPollAge", func() { m.TickPollAge(12.5) }},
+		{"RecordEvents", func() { m.RecordEvents(7) }},
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			for _, count := range tt.counts {
-				// Calling RecordEvents should never panic even if metrics is nil.
-				tt.metrics.RecordEvents(count)
-			}
-
-			if tt.metrics != nil {
-				got := getCounterValue(tt.metrics.eventsIngested)
-				assert.Equal(t, tt.wantTotal, got)
-			}
+	for _, c := range calls {
+		t.Run(c.name, func(t *testing.T) {
+			assert.NotPanics(t, c.call, "a nil *Metrics must record nothing rather than panic")
 		})
 	}
+
+	t.Run("Middleware still calls the next handler", func(t *testing.T) {
+		// RoutePattern is left unset on purpose: the nil path returns before
+		// it is consulted, so reaching it would panic and fail this test.
+		var called bool
+		next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			called = true
+			w.WriteHeader(http.StatusTeapot)
+		})
+
+		rec := httptest.NewRecorder()
+		assert.NotPanics(t, func() {
+			m.Middleware(next).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/events", nil))
+		}, "instrumentation must never be load-bearing")
+		assert.True(t, called, "the wrapped handler must still run")
+		assert.Equal(t, http.StatusTeapot, rec.Code)
+	})
 }
 
-func TestMiddleware(t *testing.T) {
+// New builds its own registry precisely so two instances in one process do not
+// collide on duplicate registration.
+func TestNewInstancesDoNotShareARegistry(t *testing.T) {
+	// Panicking here is the failure mode: a shared registry would reject the
+	// second registration of the same metric names.
+	a := New()
+	b := New()
+	a.RecordEvents(3)
+
+	assert.Contains(t, scrape(t, a), "sorovista_events_ingested_total 3")
+	assert.NotContains(t, scrape(t, b), "sorovista_events_ingested_total 3",
+		"each instance must report only its own observations")
+}
+
+func TestRecordPollLabelsByOutcome(t *testing.T) {
+	m := New()
+	m.RecordPoll(true, 250*time.Millisecond)
+
+	body := scrape(t, m)
+	assert.Contains(t, body, `sorovista_polls_total{outcome="ok"} 1`)
+	assert.NotContains(t, body, `sorovista_polls_total{outcome="error"}`,
+		"a successful poll must not create the error series")
+	assert.Contains(t, body, "sorovista_poll_duration_seconds_count 1")
+	assert.Contains(t, body, "sorovista_poll_duration_seconds_sum 0.25")
+
+	m.RecordPoll(false, 2*time.Second)
+
+	body = scrape(t, m)
+	assert.Contains(t, body, `sorovista_polls_total{outcome="ok"} 1`)
+	assert.Contains(t, body, `sorovista_polls_total{outcome="error"} 1`,
+		"a failed poll lands in its own series, leaving the ok series alone")
+	assert.Contains(t, body, "sorovista_poll_duration_seconds_count 2")
+}
+
+func TestGaugesAndCountersReportValues(t *testing.T) {
+	m := New()
+	m.SetLag(123)
+	m.TickPollAge(45.5)
+	m.RecordEvents(9)
+
+	body := scrape(t, m)
+	assert.Contains(t, body, "sorovista_ingest_lag_ledgers 123")
+	assert.Contains(t, body, "sorovista_seconds_since_last_poll 45.5")
+	assert.Contains(t, body, "sorovista_events_ingested_total 9")
+}
+
+func TestMiddlewareRecordsHandlerStatus(t *testing.T) {
+	t.Cleanup(setRoutePattern(func(*http.Request) string { return "/api/contracts/{id}" }))
+
 	tests := []struct {
-		name           string
-		metrics        *Metrics
-		handlerStatus  int
-		handlerBody    string
-		routePattern   string
-		method         string
-		path           string
-		wantStatus     int
-		wantBody       string
-		wantObserved   bool
-		expectedRoute  string
-		expectedStatus string
+		name       string
+		handler    http.HandlerFunc
+		wantStatus int
 	}{
 		{
-			name:           "happy path records status 200 with route pattern",
-			metrics:        New(),
-			handlerStatus:  http.StatusOK,
-			handlerBody:    "ok",
-			routePattern:   "/events/{id}",
-			method:         http.MethodGet,
-			path:           "/events/123",
-			wantStatus:     http.StatusOK,
-			wantBody:       "ok",
-			wantObserved:   true,
-			expectedRoute:  "/events/{id}",
-			expectedStatus: "200",
+			// The status the handler actually chose must be the label, not
+			// the 200 the recorder starts with.
+			name: "explicit status",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+			},
+			wantStatus: http.StatusNotFound,
 		},
 		{
-			name:           "error path records status 500 when handler fails",
-			metrics:        New(),
-			handlerStatus:  http.StatusInternalServerError,
-			handlerBody:    "internal error",
-			routePattern:   "/events",
-			method:         http.MethodPost,
-			path:           "/events",
-			wantStatus:     http.StatusInternalServerError,
-			wantBody:       "internal error",
-			wantObserved:   true,
-			expectedRoute:  "/events",
-			expectedStatus: "500",
-		},
-		{
-			name:           "error path records status 404 client error",
-			metrics:        New(),
-			handlerStatus:  http.StatusNotFound,
-			handlerBody:    "not found",
-			routePattern:   "",
-			method:         http.MethodGet,
-			path:           "/not-found",
-			wantStatus:     http.StatusNotFound,
-			wantBody:       "not found",
-			wantObserved:   true,
-			expectedRoute:  "/not-found",
-			expectedStatus: "404",
-		},
-		{
-			name:          "nil metrics receiver delegates to handler safely without recording",
-			metrics:       nil,
-			handlerStatus: http.StatusOK,
-			handlerBody:   "nil metrics ok",
-			routePattern:  "/test",
-			method:        http.MethodGet,
-			path:          "/test",
-			wantStatus:    http.StatusOK,
-			wantBody:      "nil metrics ok",
-			wantObserved:  false,
+			// A handler that never calls WriteHeader is recorded as 200, the
+			// statusRecorder default, which is what the client received.
+			name: "implicit 200",
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, err := w.Write([]byte("ok"))
+				assert.NoError(t, err)
+			},
+			wantStatus: http.StatusOK,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			origPattern := RoutePattern
-			defer func() { RoutePattern = origPattern }()
-
-			RoutePattern = func(r *http.Request) string {
-				return tt.routePattern
-			}
-
-			nextHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(tt.handlerStatus)
-				_, _ = w.Write([]byte(tt.handlerBody))
-			})
-
-			wrapped := tt.metrics.Middleware(nextHandler)
-			req := httptest.NewRequest(tt.method, tt.path, nil)
+			m := New()
 			rec := httptest.NewRecorder()
 
-			wrapped.ServeHTTP(rec, req)
+			m.Middleware(tt.handler).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/contracts/CABC", nil))
 
 			assert.Equal(t, tt.wantStatus, rec.Code)
-			assert.Equal(t, tt.wantBody, rec.Body.String())
-
-			if tt.wantObserved && tt.metrics != nil {
-				observer, err := tt.metrics.httpDuration.GetMetricWithLabelValues(
-					tt.expectedRoute,
-					tt.method,
-					tt.expectedStatus,
-				)
-				require.NoError(t, err)
-				count := getHistogramSampleCount(observer)
-				assert.Equal(t, uint64(1), count)
-			}
+			body := scrape(t, m)
+			assert.Contains(t, body, fmt.Sprintf(
+				`sorovista_http_request_duration_seconds_count{method="GET",route="/api/contracts/{id}",status="%s"} 1`,
+				strconv.Itoa(tt.wantStatus),
+			))
 		})
+	}
+
+	t.Run("falls back to the request path when no pattern is known", func(t *testing.T) {
+		t.Cleanup(setRoutePattern(func(*http.Request) string { return "" }))
+
+		m := New()
+		m.Middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).
+			ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/unmatched/path", nil))
+
+		assert.Contains(t, scrape(t, m),
+			`sorovista_http_request_duration_seconds_count{method="GET",route="/unmatched/path",status="200"} 1`)
+	})
+}
+
+func TestHandlerServesPrometheusTextFormat(t *testing.T) {
+	m := New()
+	m.RecordPoll(true, time.Millisecond)
+	m.SetLag(5)
+	m.TickPollAge(1)
+	m.RecordEvents(2)
+
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.True(t, strings.HasPrefix(rec.Header().Get("Content-Type"), "text/plain"),
+		"Prometheus text exposition should be served as text/plain, got %q", rec.Header().Get("Content-Type"))
+
+	body := rec.Body.String()
+	for _, want := range []string{
+		"# HELP sorovista_polls_total",
+		`sorovista_polls_total{outcome="ok"} 1`,
+		"sorovista_poll_duration_seconds_count 1",
+		"sorovista_ingest_lag_ledgers 5",
+		"sorovista_events_ingested_total 2",
+		"sorovista_seconds_since_last_poll 1",
+	} {
+		assert.Contains(t, body, want)
 	}
 }
