@@ -139,6 +139,7 @@ func (a *httpAPI) Event(ctx context.Context, id string) (source.Event, error) {
 	return e, nil
 }
 
+// Stats fetches SoroTrail's own summary of indexed events and contracts.
 func (a *httpAPI) Stats(ctx context.Context) (upstreamStats, error) {
 	var s upstreamStats
 	if err := a.get(ctx, "/stats", nil, &s); err != nil {
