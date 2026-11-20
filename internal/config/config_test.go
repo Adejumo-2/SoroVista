@@ -19,6 +19,10 @@ func TestLoad(t *testing.T) {
 		env     map[string]string
 		wantErr string
 		check   func(t *testing.T, c Config)
+		// checkErr runs on the configuration Load returned alongside an error,
+		// which is how the tests pin what a caller would see if it ignored the
+		// error.
+		checkErr func(t *testing.T, c Config)
 	}{
 		{
 			name: "standalone defaults",
@@ -106,6 +110,67 @@ func TestLoad(t *testing.T) {
 			wantErr: "invalid contract ID",
 		},
 		{
+			name: "info log level is accepted",
+			env: map[string]string{
+				"DATABASE_URL": "postgres://localhost/sorovista",
+				"LOG_LEVEL":    "info",
+			},
+			check: func(t *testing.T, c Config) {
+				assert.Equal(t, slog.LevelInfo, c.LogLevel)
+			},
+		},
+		{
+			name: "warn log level is parsed",
+			env: map[string]string{
+				"DATABASE_URL": "postgres://localhost/sorovista",
+				"LOG_LEVEL":    "warn",
+			},
+			check: func(t *testing.T, c Config) {
+				assert.Equal(t, slog.LevelWarn, c.LogLevel)
+			},
+		},
+		{
+			name: "warning is accepted as a synonym for warn",
+			env: map[string]string{
+				"DATABASE_URL": "postgres://localhost/sorovista",
+				"LOG_LEVEL":    "warning",
+			},
+			check: func(t *testing.T, c Config) {
+				assert.Equal(t, slog.LevelWarn, c.LogLevel)
+			},
+		},
+		{
+			name: "log level is case-insensitive",
+			env: map[string]string{
+				"DATABASE_URL": "postgres://localhost/sorovista",
+				"LOG_LEVEL":    "WARN",
+			},
+			check: func(t *testing.T, c Config) {
+				assert.Equal(t, slog.LevelWarn, c.LogLevel)
+			},
+		},
+		{
+			name: "error log level is parsed",
+			env: map[string]string{
+				"DATABASE_URL": "postgres://localhost/sorovista",
+				"LOG_LEVEL":    "error",
+			},
+			check: func(t *testing.T, c Config) {
+				assert.Equal(t, slog.LevelError, c.LogLevel)
+			},
+		},
+		{
+			name: "an empty log level leaves info in place",
+			env: map[string]string{
+				"DATABASE_URL": "postgres://localhost/sorovista",
+				"LOG_LEVEL":    "",
+			},
+			check: func(t *testing.T, c Config) {
+				assert.Equal(t, slog.LevelInfo, c.LogLevel,
+					"Load skips parseLevel when LOG_LEVEL is empty or unset")
+			},
+		},
+		{
 			name: "poll interval below the floor is rejected",
 			env: map[string]string{
 				"DATABASE_URL":  "postgres://localhost/sorovista",
@@ -134,12 +199,38 @@ func TestLoad(t *testing.T) {
 			},
 		},
 		{
-			name: "invalid log level is rejected",
+			name: "invalid log level names the variable and the accepted values",
 			env: map[string]string{
 				"DATABASE_URL": "postgres://localhost/sorovista",
 				"LOG_LEVEL":    "verbose",
 			},
-			wantErr: "invalid LOG_LEVEL",
+			wantErr: `invalid LOG_LEVEL "verbose" (want debug, info, warn or error)`,
+			// parseLevel hands back a usable level alongside its error so a
+			// caller that ignores the error still gets a sane default. Load
+			// turns that error into a startup failure; this pins the pairing.
+			checkErr: func(t *testing.T, c Config) {
+				assert.Equal(t, slog.LevelInfo, c.LogLevel)
+			},
+		},
+		{
+			name: "HTTP_ADDR is honoured",
+			env: map[string]string{
+				"DATABASE_URL": "postgres://localhost/sorovista",
+				"HTTP_ADDR":    ":9090",
+			},
+			check: func(t *testing.T, c Config) {
+				assert.Equal(t, ":9090", c.HTTPAddr)
+			},
+		},
+		{
+			name: "an empty HTTP_ADDR falls back to the default",
+			env: map[string]string{
+				"DATABASE_URL": "postgres://localhost/sorovista",
+				"HTTP_ADDR":    "",
+			},
+			check: func(t *testing.T, c Config) {
+				assert.Equal(t, DefaultHTTPAddr, c.HTTPAddr)
+			},
 		},
 		{
 			name: "start ledger must be positive",
@@ -174,6 +265,9 @@ func TestLoad(t *testing.T) {
 			if tt.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantErr)
+				if tt.checkErr != nil {
+					tt.checkErr(t, cfg)
+				}
 				return
 			}
 			require.NoError(t, err)
