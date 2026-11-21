@@ -114,6 +114,55 @@ func TestListContractsForwardsQuery(t *testing.T) {
 	assert.Equal(t, "CA", st.lastContractQuery.Search)
 }
 
+func TestContractStats(t *testing.T) {
+	st := &stubStore{contractStats: source.ContractStats{
+		ContractID:  "CAAA",
+		TotalEvents: 3,
+		FirstLedger: 100,
+		LastLedger:  120,
+		TypeBreakdown: []source.TypeCount{
+			{Type: "contract", Count: 2},
+			{Type: "diagnostic", Count: 1},
+		},
+	}}
+	src := New(st, healthyRPC())
+
+	got, err := src.ContractStats(context.Background(), "CAAA")
+	require.NoError(t, err)
+
+	assert.Equal(t, "CAAA", got.ContractID)
+	assert.Equal(t, int64(3), got.TotalEvents)
+	assert.Equal(t, int64(100), got.FirstLedger)
+	assert.Equal(t, int64(120), got.LastLedger)
+	assert.Equal(t, []source.TypeCount{
+		{Type: "contract", Count: 2},
+		{Type: "diagnostic", Count: 1},
+	}, got.TypeBreakdown)
+	// Approximate is part of the interface rather than an incidental field:
+	// the UI labels approximate figures. Standalone counts in SQL, so it is
+	// always exact.
+	assert.False(t, got.Approximate, "standalone mode counts exactly")
+}
+
+func TestContractStatsUnknownContractIsEmpty(t *testing.T) {
+	// The Postgres implementation counts with COALESCE(MIN(ledger), 0) and
+	// COALESCE(MAX(ledger), 0), so a contract with no stored events comes back
+	// as zeros rather than source.ErrNotFound. The wrapper must pass that
+	// through unchanged instead of inventing an error.
+	st := &stubStore{contractStats: source.ContractStats{ContractID: "CZZZ"}}
+	src := New(st, healthyRPC())
+
+	got, err := src.ContractStats(context.Background(), "CZZZ")
+	require.NoError(t, err)
+
+	assert.Equal(t, "CZZZ", got.ContractID)
+	assert.Zero(t, got.TotalEvents)
+	assert.Zero(t, got.FirstLedger)
+	assert.Zero(t, got.LastLedger)
+	assert.Empty(t, got.TypeBreakdown)
+	assert.False(t, got.Approximate)
+}
+
 func TestStatsAreExact(t *testing.T) {
 	st := &stubStore{stats: source.Stats{TotalEvents: 10, ContractCount: 2}}
 	src := New(st, healthyRPC())
@@ -137,6 +186,11 @@ func TestErrorsPropagate(t *testing.T) {
 	assert.Error(t, err)
 
 	_, err = src.Stats(ctx)
+	assert.Error(t, err)
+
+	// A store failure on a stats read must surface, not collapse into empty
+	// stats that look like a contract with no activity.
+	_, err = src.ContractStats(ctx, "CAAA")
 	assert.Error(t, err)
 }
 

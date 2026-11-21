@@ -80,6 +80,13 @@ WATCHED_CONTRACTS=CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC \
 
 ### Standalone, bare metal
 
+**Example:** Build and run SoroVista in standalone mode:
+
+```bash
+make run
+```
+
+
 ```sh
 docker compose up -d postgres     # or bring your own Postgres
 cp .env.example .env              # adjust as needed
@@ -88,6 +95,13 @@ make run
 ```
 
 ### Upstream, against a SoroTrail indexer
+
+**Example:** Start SoroVista in upstream mode against a SoroTrail indexer:
+
+```bash
+SOURCE_MODE=sorotrail SOROTRAIL_URL=http://your-sorotrail:8080 PORT=8080 go run ./cmd/sorovista
+```
+
 
 No database needed:
 
@@ -105,6 +119,13 @@ SOURCE_MODE=sorotrail SOROTRAIL_URL=http://your-sorotrail:8080 docker compose up
 ```
 
 ## Configuration
+
+**Example:** Set the network and start the service:
+
+```bash
+NETWORK=testnet PORT=8080 go run ./cmd/sorovista
+```
+
 
 All configuration comes from environment variables (see `.env.example`).
 SoroVista validates the variables its selected mode requires and fails at
@@ -132,7 +153,15 @@ per filter.
 
 ## Observability
 
-`/metrics` serves Prometheus instrumentation: HTTP request duration by route pattern, and — in standalone mode — poll outcomes and duration, ingest lag behind the chain tip, seconds since the last poll, and the events-ingested counter. `/livez` and `/readyz` are orchestration probes: liveness checks nothing (a dead backend is a load-balancer concern, not a restart concern); readiness consults the event source's own health view — the database and RPC in standalone mode, the SoroTrail indexer in upstream mode. `/api/version` reports the version, commit and build date baked in at compile time. Every response carries an `X-Request-ID` correlation header, echoed in error bodies and log lines.
+**Example:**
+
+```bash
+# Check the health status of the service
+curl http://localhost:8080/health
+```
+
+
+`/metrics` serves Prometheus instrumentation; see the [metrics reference](docs/reference/metrics.md) for every metric, its labels and example queries. `/livez` and `/readyz` are orchestration probes: liveness checks nothing (a dead backend is a load-balancer concern, not a restart concern); readiness consults the event source's own health view — the database and RPC in standalone mode, the SoroTrail indexer in upstream mode. `/api/version` reports the version, commit and build date baked in at compile time. Every response carries an `X-Request-ID` correlation header, echoed in error bodies and log lines.
 
 ## Networks
 
