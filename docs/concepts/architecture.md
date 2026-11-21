@@ -68,9 +68,8 @@ There is no write route to call — anything other than `GET` on these paths ret
 
 ## Observability (`internal/metrics`, `internal/reqid`, `internal/buildinfo`)
 
-- `/metrics` — Prometheus: HTTP request duration by route pattern; in
-  standalone mode also poll outcomes/duration, ingest lag behind the tip,
-  seconds since last poll, and events ingested.
+- `/metrics` — Prometheus instrumentation; the [metrics reference](../reference/metrics.md)
+  lists every metric, its labels and example queries.
 - `/livez`, `/readyz` — liveness checks nothing (restart loops otherwise);
   readiness consults the event source's `Status`, so it means the same
   thing regardless of backend.
