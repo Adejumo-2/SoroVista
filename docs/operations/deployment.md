@@ -9,6 +9,13 @@ docker compose up -d
 
 Put a reverse proxy (Caddy, nginx, Traefik) in front for TLS. SoroVista is read-only, so exposing it publicly is lower-risk than a service with a mutation API — but it's still worth deciding deliberately whether it should be public or internal-only.
 
+**Example:** Check container status and verify the service is running:
+
+```bash
+docker compose ps
+curl http://localhost:8080/health
+```
+
 ## Deploying in upstream mode
 
 No local Postgres is needed — just the SoroVista binary/container and network access to your SoroTrail instance's API:
@@ -17,6 +24,15 @@ No local Postgres is needed — just the SoroVista binary/container and network 
 SOURCE_MODE=sorotrail
 SOROTRAIL_URL=https://your-sorotrail-instance.example.com
 HTTP_ADDR=:8080
+```
+
+**Example:** Run SoroVista directly in upstream mode:
+
+```bash
+SOURCE_MODE=sorotrail \
+SOROTRAIL_URL=https://your-sorotrail-instance.example.com \
+HTTP_ADDR=:8080 \
+./bin/sorovista
 ```
 
 This is the lighter deployment: one process, no database, no ingestion loop of its own. If you already run SoroTrail in production, running SoroVista alongside it in upstream mode is usually the simpler choice.
@@ -67,3 +83,17 @@ services:
 1. (Standalone only) back up the database.
 2. Pull the new version, run migrations if standalone, restart.
 3. Verify `GET /health` reports the expected source mode and reachability.
+
+**Example:** Upgrade a Docker Compose deployment:
+
+```bash
+# 1. Back up database (standalone mode)
+docker compose exec postgres pg_dump -U sorovista sorovista > backup_$(date +%Y%m%d).sql
+
+# 2. Pull latest images and restart containers
+docker compose pull
+docker compose up -d
+
+# 3. Verify health
+curl http://localhost:8080/health
+```
