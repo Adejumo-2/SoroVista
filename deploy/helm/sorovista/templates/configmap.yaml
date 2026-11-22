@@ -12,6 +12,13 @@ data:
   {{- if .Values.corsAllowedOrigins }}
   CORS_ALLOWED_ORIGINS: {{ .Values.corsAllowedOrigins | quote }}
   {{- end }}
+  {{- if and .Values.rateLimitRPS .Values.rateLimitBurst }}
+  RATE_LIMIT_RPS: {{ .Values.rateLimitRPS | quote }}
+  RATE_LIMIT_BURST: {{ .Values.rateLimitBurst | quote }}
+  {{- end }}
+  {{- if .Values.rateLimitTrustedProxy }}
+  RATE_LIMIT_TRUSTED_PROXY: "true"
+  {{- end }}
   {{- if eq .Values.sourceMode "rpc" }}
   NETWORK: {{ .Values.network | quote }}
   {{- if .Values.rpcUrl }}
