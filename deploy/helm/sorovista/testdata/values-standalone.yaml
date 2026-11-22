@@ -8,6 +8,9 @@ replicaCount: 1
 httpAddr: ":8080"
 logLevel: debug
 corsAllowedOrigins: "https://explorer.example.test"
+rateLimitRPS: 10
+rateLimitBurst: 20
+rateLimitTrustedProxy: true
 
 network: mainnet
 rpcUrl: "https://rpc.example.test"

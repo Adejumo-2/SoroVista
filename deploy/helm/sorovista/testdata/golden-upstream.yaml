@@ -16,7 +16,6 @@ spec:
     matchLabels:
       app.kubernetes.io/name: sorovista
       app.kubernetes.io/instance: sorovista
-
 ---
 # Source: sorovista/templates/serviceaccount.yaml
 apiVersion: v1
@@ -29,7 +28,6 @@ metadata:
     app.kubernetes.io/instance: sorovista
     app.kubernetes.io/version: "0.1.0"
     app.kubernetes.io/managed-by: Helm
-
 ---
 # Source: sorovista/templates/configmap.yaml
 apiVersion: v1
@@ -48,7 +46,6 @@ data:
   LOG_LEVEL: "info"
   CORS_ALLOWED_ORIGINS: "https://explorer.example.test"
   SOROTRAIL_URL: "http://sorotrail:8080"
-
 ---
 # Source: sorovista/templates/service.yaml
 apiVersion: v1
@@ -71,7 +68,6 @@ spec:
   selector:
     app.kubernetes.io/name: sorovista
     app.kubernetes.io/instance: sorovista
-
 ---
 # Source: sorovista/templates/deployment.yaml
 apiVersion: apps/v1

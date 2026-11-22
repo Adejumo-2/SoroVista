@@ -66,6 +66,10 @@ logLevel: info
 # Comma-separated browser Origins allowed to call the API. Empty omits the
 # variable, which disables CORS.
 corsAllowedOrigins: ""
+rateLimitRPS: 0
+rateLimitBurst: 0
+# Only enable behind a proxy that overwrites X-Forwarded-For.
+rateLimitTrustedProxy: false
 
 # --- Standalone (sourceMode=rpc) only ----------------------------------------
 
