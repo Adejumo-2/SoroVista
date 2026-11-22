@@ -44,6 +44,10 @@ data:
   SOURCE_MODE: "sorotrail"
   HTTP_ADDR: ":8080"
   LOG_LEVEL: "info"
+  OTEL_ENABLED: "false"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4318"
+  OTEL_SAMPLE_RATE: "0.1"
+  OTEL_SERVICE_NAME: "sorovista"
   CORS_ALLOWED_ORIGINS: "https://explorer.example.test"
   SOROTRAIL_URL: "http://sorotrail:8080"
 ---
@@ -90,7 +94,7 @@ spec:
     metadata:
       annotations:
         # Roll pods when the rendered configuration changes.
-        checksum/config: 871d2907702a9fe8bdacacf8de1c17a32a52dabd412c09bb87bcd565915a50c8
+        checksum/config: 1bc2998da053841837e1e8cfca23015c64cbc5b3a1075de796ca0b3c224ca4a1
       labels:
         app.kubernetes.io/name: sorovista
         app.kubernetes.io/instance: sorovista

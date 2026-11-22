@@ -9,6 +9,10 @@ data:
   SOURCE_MODE: {{ .Values.sourceMode | quote }}
   HTTP_ADDR: {{ .Values.httpAddr | quote }}
   LOG_LEVEL: {{ .Values.logLevel | quote }}
+  OTEL_ENABLED: {{ .Values.otelEnabled | quote }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.otelEndpoint | quote }}
+  OTEL_SAMPLE_RATE: {{ .Values.otelSampleRate | quote }}
+  OTEL_SERVICE_NAME: {{ .Values.otelServiceName | quote }}
   {{- if .Values.corsAllowedOrigins }}
   CORS_ALLOWED_ORIGINS: {{ .Values.corsAllowedOrigins | quote }}
   {{- end }}

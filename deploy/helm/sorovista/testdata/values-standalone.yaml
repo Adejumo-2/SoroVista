@@ -11,6 +11,10 @@ corsAllowedOrigins: "https://explorer.example.test"
 rateLimitRPS: 10
 rateLimitBurst: 20
 rateLimitTrustedProxy: true
+otelEnabled: true
+otelEndpoint: http://otel-collector:4318
+otelSampleRate: 0.25
+otelServiceName: sorovista-test
 
 network: mainnet
 rpcUrl: "https://rpc.example.test"

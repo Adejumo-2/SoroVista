@@ -70,6 +70,12 @@ rateLimitRPS: 0
 rateLimitBurst: 0
 # Only enable behind a proxy that overwrites X-Forwarded-For.
 rateLimitTrustedProxy: false
+# Tracing is opt-in. The endpoint, sample rate, and service name are ignored
+# while otelEnabled is false.
+otelEnabled: false
+otelEndpoint: http://localhost:4318
+otelSampleRate: 0.1
+otelServiceName: sorovista
 
 # --- Standalone (sourceMode=rpc) only ----------------------------------------
 

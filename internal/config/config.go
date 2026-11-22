@@ -29,6 +29,12 @@ const (
 	DefaultRPCURL       = "https://soroban-testnet.stellar.org"
 	DefaultPollInterval = 5 * time.Second
 	DefaultHTTPAddr     = ":8080"
+	// Tracing defaults. A 10% head rate keeps a busy chain-tip instance from
+	// flooding a collector while still producing enough traces to diagnose a
+	// slow page view.
+	DefaultOTelEndpoint    = "http://localhost:4318"
+	DefaultOTelSampleRate  = 0.1
+	DefaultOTelServiceName = "sorovista"
 	// DefaultRetentionLedgers is how far back a cold start reaches when
 	// START_LEDGER is unset — roughly 24h at ~5s per ledger. Stellar RPC
 	// retains events for about 24h to 7d, so reaching further back than the
@@ -80,6 +86,19 @@ type Config struct {
 	// LogLevel is the minimum slog level (debug, info, warn, error).
 	LogLevel slog.Level
 
+	// OTelEnabled turns OpenTelemetry tracing on. Off by default: an
+	// operator who sets nothing gets no exporter and no background work.
+	OTelEnabled bool
+	// OTelEndpoint is the OTLP/HTTP collector endpoint, with or without a
+	// scheme. Used only when tracing is enabled.
+	OTelEndpoint string
+	// OTelSampleRate is the head sampling ratio for new traces, in [0,1].
+	// ParentBased sampling means an inbound sampling decision is honoured
+	// regardless of this value.
+	OTelSampleRate float64
+	// OTelServiceName names this service in traces. Defaults to "sorovista".
+	OTelServiceName string
+
 	// RateLimitRPS is the sustained per-client request rate for /api, in
 	// requests per second. Zero disables rate limiting, which is the default
 	// so an existing deployment does not change behaviour on upgrade.
@@ -117,6 +136,9 @@ func Load() (Config, error) {
 		RetentionLedgers: DefaultRetentionLedgers,
 		HTTPAddr:         getenv("HTTP_ADDR", DefaultHTTPAddr),
 		LogLevel:         slog.LevelInfo,
+		OTelEndpoint:     getenv("OTEL_EXPORTER_OTLP_ENDPOINT", DefaultOTelEndpoint),
+		OTelSampleRate:   DefaultOTelSampleRate,
+		OTelServiceName:  getenv("OTEL_SERVICE_NAME", DefaultOTelServiceName),
 	}
 
 	if v := os.Getenv("SOURCE_MODE"); v != "" {
@@ -186,6 +208,22 @@ func Load() (Config, error) {
 		cfg.LogLevel = lvl
 	}
 
+	if v := os.Getenv("OTEL_ENABLED"); v != "" {
+		enabled, err := strconv.ParseBool(v)
+		if err != nil {
+			return cfg, fmt.Errorf("invalid OTEL_ENABLED %q: want true or false", v)
+		}
+		cfg.OTelEnabled = enabled
+	}
+
+	if v := os.Getenv("OTEL_SAMPLE_RATE"); v != "" {
+		rate, err := strconv.ParseFloat(v, 64)
+		if err != nil || rate < 0 || rate > 1 {
+			return cfg, fmt.Errorf("invalid OTEL_SAMPLE_RATE %q: want a number in [0,1]", v)
+		}
+		cfg.OTelSampleRate = rate
+	}
+
 	if v := os.Getenv("RATE_LIMIT_RPS"); v != "" {
 		rps, err := strconv.ParseFloat(v, 64)
 		if err != nil || rps <= 0 {
@@ -246,6 +284,9 @@ func (c Config) validate() error {
 
 	if c.HTTPAddr == "" {
 		return fmt.Errorf("HTTP_ADDR must not be empty")
+	}
+	if c.OTelEnabled && c.OTelEndpoint == "" {
+		return fmt.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT must not be empty when OTEL_ENABLED=true")
 	}
 	return nil
 }

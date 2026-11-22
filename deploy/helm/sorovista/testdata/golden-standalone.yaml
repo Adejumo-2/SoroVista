@@ -41,6 +41,10 @@ data:
   SOURCE_MODE: "rpc"
   HTTP_ADDR: ":8080"
   LOG_LEVEL: "debug"
+  OTEL_ENABLED: "true"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
+  OTEL_SAMPLE_RATE: "0.25"
+  OTEL_SERVICE_NAME: "sorovista-test"
   CORS_ALLOWED_ORIGINS: "https://explorer.example.test"
   RATE_LIMIT_RPS: "10"
   RATE_LIMIT_BURST: "20"
@@ -96,7 +100,7 @@ spec:
     metadata:
       annotations:
         # Roll pods when the rendered configuration changes.
-        checksum/config: 03bf6df1b73d69c78042609bf890d12e3f1e870b5b8f98ade8a2d3f324197168
+        checksum/config: afecb51bfaa0ea5571dc8e365b98550e740294f0edcad7251c871b16c9454ebf
         checksum/secret: a56de3e7da7cb784384f5128725af447a2f0cd42612a78dfaffaae8e86852671
       labels:
         app.kubernetes.io/name: sorovista
