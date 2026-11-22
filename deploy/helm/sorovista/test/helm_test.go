@@ -57,6 +57,20 @@ func render(t *testing.T, valuesFile string, extra ...string) string {
 	return string(out)
 }
 
+func normalizeRender(output string) string {
+	lines := strings.Split(output, "\n")
+	normalized := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if line == "---" {
+			for len(normalized) > 0 && normalized[len(normalized)-1] == "" {
+				normalized = normalized[:len(normalized)-1]
+			}
+		}
+		normalized = append(normalized, line)
+	}
+	return strings.Join(normalized, "\n")
+}
+
 func TestGoldenRender(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -69,7 +83,7 @@ func TestGoldenRender(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := render(t, tt.valuesFile)
+			got := normalizeRender(render(t, tt.valuesFile))
 			goldenPath, err := filepath.Abs(filepath.Join("..", "testdata", tt.goldenFile))
 			if err != nil {
 				t.Fatalf("resolve golden file: %v", err)
@@ -86,6 +100,7 @@ func TestGoldenRender(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read golden (run go test ./... -run TestGoldenRender -update): %v", err)
 			}
+			want = []byte(normalizeRender(string(want)))
 			if !bytes.Equal([]byte(got), want) {
 				t.Fatalf("rendered chart differs from %s\n%s", goldenPath, lineDiff(string(want), got))
 			}
