@@ -164,7 +164,7 @@ curl http://localhost:8080/health
 ```
 
 
-`/metrics` serves Prometheus instrumentation: HTTP request duration by route pattern, and — in standalone mode — poll outcomes and duration, ingest lag behind the chain tip, seconds since the last poll, and the events-ingested counter. `/livez` and `/readyz` are orchestration probes: liveness checks nothing (a dead backend is a load-balancer concern, not a restart concern); readiness consults the event source's own health view — the database and RPC in standalone mode, the SoroTrail indexer in upstream mode. `/api/version` reports the version, commit and build date baked in at compile time. Every response carries an `X-Request-ID` correlation header, echoed in error bodies and log lines.
+`/metrics` serves Prometheus instrumentation; see the [metrics reference](docs/reference/metrics.md) for every metric, its labels and example queries. `/livez` and `/readyz` are orchestration probes: liveness checks nothing (a dead backend is a load-balancer concern, not a restart concern); readiness consults the event source's own health view — the database and RPC in standalone mode, the SoroTrail indexer in upstream mode. `/api/version` reports the version, commit and build date baked in at compile time. Every response carries an `X-Request-ID` correlation header, echoed in error bodies and log lines.
 
 ## Networks
 

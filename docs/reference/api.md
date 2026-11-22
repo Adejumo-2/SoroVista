@@ -6,6 +6,25 @@ Base URL: wherever `HTTP_ADDR` serves (default `http://localhost:8080`). All API
 
 ## Health & stats
 
+**Example:** Check system health and ingest statistics:
+
+```bash
+curl http://localhost:8080/health
+curl http://localhost:8080/api/stats
+```
+
+Sample response payload for `GET /api/stats`:
+
+```json
+{
+  "total_events": 14200,
+  "contract_count": 85,
+  "first_ledger": 500000,
+  "last_ledger": 512000,
+  "approximate": false
+}
+```
+
 ### `GET /health`
 Reports process health, including the active source (RPC or SoroTrail) and, in standalone mode, database reachability.
 
