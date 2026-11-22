@@ -98,6 +98,20 @@ type Config struct {
 	OTelSampleRate float64
 	// OTelServiceName names this service in traces. Defaults to "sorovista".
 	OTelServiceName string
+
+	// RateLimitRPS is the sustained per-client request rate for /api, in
+	// requests per second. Zero disables rate limiting, which is the default
+	// so an existing deployment does not change behaviour on upgrade.
+	RateLimitRPS float64
+	// RateLimitBurst is the maximum instantaneous burst per client. It must
+	// be set together with RateLimitRPS; a burst smaller than one request
+	// would reject everything.
+	RateLimitBurst int
+	// RateLimitTrustedProxy makes the limiter key on the first
+	// X-Forwarded-For entry instead of the socket's remote address. That is
+	// only safe behind a proxy that overwrites the header, because a client
+	// can otherwise choose its own key.
+	RateLimitTrustedProxy bool
 }
 
 // UsesDatabase reports whether the selected mode needs Postgres. Upstream mode
@@ -208,6 +222,36 @@ func Load() (Config, error) {
 			return cfg, fmt.Errorf("invalid OTEL_SAMPLE_RATE %q: want a number in [0,1]", v)
 		}
 		cfg.OTelSampleRate = rate
+	}
+
+	if v := os.Getenv("RATE_LIMIT_RPS"); v != "" {
+		rps, err := strconv.ParseFloat(v, 64)
+		if err != nil || rps <= 0 {
+			return cfg, fmt.Errorf("invalid RATE_LIMIT_RPS %q: want a positive number", v)
+		}
+		cfg.RateLimitRPS = rps
+	}
+
+	if v := os.Getenv("RATE_LIMIT_BURST"); v != "" {
+		burst, err := strconv.Atoi(v)
+		if err != nil || burst <= 0 {
+			return cfg, fmt.Errorf("invalid RATE_LIMIT_BURST %q: want a positive integer", v)
+		}
+		cfg.RateLimitBurst = burst
+	}
+
+	// Both halves are required together: a rate with no burst has no defined
+	// instantaneous allowance, and a burst with no rate never refills.
+	if (cfg.RateLimitRPS == 0) != (cfg.RateLimitBurst == 0) {
+		return cfg, fmt.Errorf("RATE_LIMIT_RPS and RATE_LIMIT_BURST must be set together (leave both unset to disable rate limiting)")
+	}
+
+	if v := os.Getenv("RATE_LIMIT_TRUSTED_PROXY"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return cfg, fmt.Errorf("invalid RATE_LIMIT_TRUSTED_PROXY %q: want true or false", v)
+		}
+		cfg.RateLimitTrustedProxy = b
 	}
 
 	if err := cfg.validate(); err != nil {

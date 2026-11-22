@@ -141,6 +141,9 @@ startup with a message naming both, rather than failing later on a request.
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` | both | OTLP/HTTP collector endpoint; used only when tracing is enabled. |
 | `OTEL_SAMPLE_RATE` | `0.1` | both | Head sampling ratio in `[0,1]`. Parent-based sampling honours inbound decisions. |
 | `OTEL_SERVICE_NAME` | `sorovista` | both | Service name reported in traces. |
+| `RATE_LIMIT_RPS` | empty (off) | both | Sustained per-client requests/second for `/api`. Must be set with `RATE_LIMIT_BURST`; both empty disables rate limiting. |
+| `RATE_LIMIT_BURST` | empty (off) | both | Per-client instantaneous burst allowance. Must be set with `RATE_LIMIT_RPS`. |
+| `RATE_LIMIT_TRUSTED_PROXY` | `false` | both | Key the limiter on the first `X-Forwarded-For` entry. Only safe behind a proxy that overwrites the header. |
 | `NETWORK` | `testnet` | standalone | `testnet` \| `mainnet` \| `futurenet` \| `custom`. Selects the network preset (passphrase + public RPC). |
 | `RPC_URL` | per `NETWORK` | standalone | Stellar RPC endpoint; overrides the preset. |
 | `NETWORK_PASSPHRASE` | per `NETWORK` | standalone | Overrides the preset passphrase. Required with `NETWORK=custom`. |
@@ -165,7 +168,7 @@ curl http://localhost:8080/health
 ```
 
 
-`/metrics` serves Prometheus instrumentation: HTTP request duration by route pattern, and — in standalone mode — poll outcomes and duration, ingest lag behind the chain tip, seconds since the last poll, and the events-ingested counter. `/livez` and `/readyz` are orchestration probes: liveness checks nothing (a dead backend is a load-balancer concern, not a restart concern); readiness consults the event source's own health view — the database and RPC in standalone mode, the SoroTrail indexer in upstream mode — and reports each dependency separately with a `fatal` or `degraded` severity. `/api/version` reports the version, commit and build date baked in at compile time. Every response carries an `X-Request-ID` correlation header, echoed in error bodies and log lines.
+`/metrics` serves Prometheus instrumentation; see the [metrics reference](docs/reference/metrics.md) for every metric, its labels and example queries. `/livez` and `/readyz` are orchestration probes: liveness checks nothing (a dead backend is a load-balancer concern, not a restart concern); readiness consults the event source's own health view — the database and RPC in standalone mode, the SoroTrail indexer in upstream mode — and reports each dependency separately with a `fatal` or `degraded` severity. `/api/version` reports the version, commit and build date baked in at compile time. Every response carries an `X-Request-ID` correlation header, echoed in error bodies and log lines.
 
 Set `OTEL_ENABLED=true` to export traces over OTLP/HTTP. Spans cover inbound HTTP requests, outbound RPC and SoroTrail calls, store queries and each ingest poll; W3C `traceparent` continues an inbound trace and is propagated onward. The request ID is attached to the request span, joining traces to log lines.
 
