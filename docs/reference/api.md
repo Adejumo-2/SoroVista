@@ -9,6 +9,20 @@ Base URL: wherever `HTTP_ADDR` serves (default `http://localhost:8080`). All API
 ### `GET /health`
 Reports process health, including the active source (RPC or SoroTrail) and, in standalone mode, database reachability.
 
+```bash
+curl http://localhost:8080/health
+```
+
+Sample response (`200 OK`):
+
+```json
+{
+  "mode": "rpc",
+  "healthy": true,
+  "latest_ledger": 512000
+}
+```
+
 ### `GET /api/stats`
 Overview counters: total contracts seen, total events, `first_ledger`, `last_ledger`, and an event-type breakdown (`type_breakdown`).
 
