@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sorotrail/sorovista/internal/buildinfo"
 	"github.com/sorotrail/sorovista/internal/source"
 )
 
@@ -256,6 +257,38 @@ func TestStats(t *testing.T) {
 	require.Len(t, got.TypeBreakdown, 1)
 }
 
+func TestStatsError(t *testing.T) {
+	src := &fakeSource{err: errors.New("database connection lost")}
+
+	rec := do(t, testServer(src), "/api/stats")
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+
+	var body errorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Contains(t, body.Error, "loading stats failed")
+	assert.NotContains(t, body.Error, "database connection lost")
+}
+
+func TestStatsEmpty(t *testing.T) {
+	src := &fakeSource{stats: source.Stats{
+		TotalEvents:   0,
+		ContractCount: 0,
+		FirstLedger:   0,
+		LastLedger:    0,
+		TypeBreakdown: nil,
+		Approximate:   false,
+	}}
+
+	rec := do(t, testServer(src), "/api/stats")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var got source.Stats
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, int64(0), got.TotalEvents)
+	assert.False(t, got.Approximate)
+	require.Empty(t, got.TypeBreakdown, "TypeBreakdown must be omitted when empty, since it carries omitempty")
+}
+
 func TestContractStats(t *testing.T) {
 	src := &fakeSource{contractStats: source.ContractStats{
 		ContractID:  testContract,
@@ -268,6 +301,40 @@ func TestContractStats(t *testing.T) {
 	var got source.ContractStats
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	assert.Equal(t, int64(42), got.TotalEvents)
+}
+
+func TestContractStatsError(t *testing.T) {
+	src := &fakeSource{err: errors.New("connection timeout")}
+
+	rec := do(t, testServer(src), "/api/contracts/"+testContract+"/stats")
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+
+	var body errorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Contains(t, body.Error, "loading contract stats failed")
+	assert.NotContains(t, body.Error, "connection timeout")
+}
+
+func TestContractStatsInvalidID(t *testing.T) {
+	h := testServer(&fakeSource{})
+
+	rec := do(t, h, "/api/contracts/not-a-contract-id/stats")
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	var body errorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Contains(t, body.Error, "invalid contract ID")
+}
+
+func TestVersion(t *testing.T) {
+	rec := do(t, testServer(&fakeSource{}), "/api/version")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var got buildinfo.Info
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.NotEmpty(t, got.Version, "version must be present")
+	assert.NotEmpty(t, got.Commit, "commit must be present")
+	assert.NotEmpty(t, got.Date, "build date must be present")
 }
 
 func TestHealth(t *testing.T) {
