@@ -6,8 +6,41 @@ Base URL: wherever `HTTP_ADDR` serves (default `http://localhost:8080`). All API
 
 ## Health & stats
 
+**Example:** Check system health and ingest statistics:
+
+```bash
+curl http://localhost:8080/health
+curl http://localhost:8080/api/stats
+```
+
+Sample response payload for `GET /api/stats`:
+
+```json
+{
+  "total_events": 14200,
+  "contract_count": 85,
+  "first_ledger": 500000,
+  "last_ledger": 512000,
+  "approximate": false
+}
+```
+
 ### `GET /health`
-Reports process health, including the active source (RPC or SoroTrail) and, in standalone mode, database reachability.
+Reports overall health and, in a `dependencies` array, each backend component's own status. Standalone mode reports `postgres` and `stellar_rpc`; upstream mode reports only `sorotrail`, because it opens no database. Each dependency carries `healthy`, a `severity` of `fatal` (the read paths break without it) or `degraded` (some data is still served), and a sanitized `detail` when unhealthy. The existing top-level fields are unchanged, and `/readyz` returns `200`/`503` under the same conditions as before. Liveness (`/livez`) deliberately does not check dependencies.
+
+```bash
+curl http://localhost:8080/health
+```
+
+Sample response (`200 OK`):
+
+```json
+{
+  "mode": "rpc",
+  "healthy": true,
+  "latest_ledger": 512000
+}
+```
 
 ### `GET /api/stats`
 Overview counters: total contracts seen, total events, last-updated ledger (standalone mode) or last-synced position (upstream mode).
@@ -39,6 +72,7 @@ A contract's events, newest-first.
 | `tx_hash` | Restrict to events from one transaction |
 | `topic` | Match by decoded topic (see build semantics) |
 | `from_ledger` / `to_ledger` | Inclusive ledger bounds |
+| `from_time` / `to_time` | Inclusive RFC 3339 bounds on `ledger_closed_at` (on-chain close time, not ingest time) |
 | `limit` / `cursor` | Pagination |
 
 ```bash
@@ -98,6 +132,28 @@ Event objects returned by `GET /api/events`, `GET /api/contracts/{id}/events`, `
 ## Pagination
 
 List responses include `next_cursor`; pass it back as `cursor` for the next page. A null `next_cursor` means you've reached the end. Treat the cursor as opaque.
+
+## Rate limiting
+
+Rate limiting is **off by default**. Set both `RATE_LIMIT_RPS` (sustained requests per second) and `RATE_LIMIT_BURST` (instantaneous allowance) to enable a per-client token bucket over `/api`. A partial pair is rejected at startup rather than guessed at.
+
+When a client exceeds its allowance the response is `429 Too Many Requests` with a `Retry-After` header in whole seconds and the usual JSON error envelope:
+
+```json
+{
+  "error": "rate limit exceeded; retry after 2 seconds",
+  "code": "Too Many Requests",
+  "request_id": "..."
+}
+```
+
+`Retry-After` comes from the limiter's actual token state, so it is the real wait until capacity returns rather than a fixed constant.
+
+**Key:** the socket's remote address. Behind a proxy, set `RATE_LIMIT_TRUSTED_PROXY=true` to key on the first `X-Forwarded-For` entry instead — only safe when the proxy overwrites that header, since a client can otherwise choose its own bucket.
+
+**Exempt:** `/health`, `/livez`, `/readyz`, `/metrics`, and the web UI (its htmx partials are ordinary page loads and a limit tuned for API clients must not lock out a browsing session). Only `/api` is limited.
+
+Rejections increment `sorovista_http_rate_limited_total`, so an operator can tell a tight limit from real abuse.
 
 ## Errors
 
