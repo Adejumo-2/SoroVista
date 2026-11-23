@@ -28,6 +28,20 @@ Sample response payload for `GET /api/stats`:
 ### `GET /health`
 Reports overall health and, in a `dependencies` array, each backend component's own status. Standalone mode reports `postgres` and `stellar_rpc`; upstream mode reports only `sorotrail`, because it opens no database. Each dependency carries `healthy`, a `severity` of `fatal` (the read paths break without it) or `degraded` (some data is still served), and a sanitized `detail` when unhealthy. The existing top-level fields are unchanged, and `/readyz` returns `200`/`503` under the same conditions as before. Liveness (`/livez`) deliberately does not check dependencies.
 
+```bash
+curl http://localhost:8080/health
+```
+
+Sample response (`200 OK`):
+
+```json
+{
+  "mode": "rpc",
+  "healthy": true,
+  "latest_ledger": 512000
+}
+```
+
 ### `GET /api/stats`
 Overview counters: total contracts seen, total events, last-updated ledger (standalone mode) or last-synced position (upstream mode).
 
