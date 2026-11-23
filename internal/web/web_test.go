@@ -3,6 +3,8 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"html/template"
 	"io"
 	"log/slog"
 	"net/http"
@@ -14,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sorotrail/sorovista/internal/reqid"
 	"github.com/sorotrail/sorovista/internal/source"
 )
 
@@ -29,6 +32,13 @@ type fakeSource struct {
 	status        source.Status
 	err           error
 
+	// Method-specific errors let a test fail one call without failing every
+	// call the handler makes — index calls both Stats and ListEvents.
+	statsErr         error
+	listEventsErr    error
+	getEventErr      error
+	contractStatsErr error
+
 	lastEventQuery source.EventQuery
 }
 
@@ -38,19 +48,38 @@ func (f *fakeSource) ListContracts(context.Context, source.ContractQuery) (sourc
 
 func (f *fakeSource) ListEvents(_ context.Context, q source.EventQuery) (source.EventPage, error) {
 	f.lastEventQuery = q
+	if f.listEventsErr != nil {
+		return source.EventPage{}, f.listEventsErr
+	}
 	return f.events, f.err
 }
 
 func (f *fakeSource) GetEvent(context.Context, string) (source.Event, error) {
+	if f.getEventErr != nil {
+		return source.Event{}, f.getEventErr
+	}
 	return f.event, f.err
 }
 
 func (f *fakeSource) ContractStats(context.Context, string) (source.ContractStats, error) {
+	if f.contractStatsErr != nil {
+		return source.ContractStats{}, f.contractStatsErr
+	}
 	return f.contractStats, f.err
 }
 
-func (f *fakeSource) Stats(context.Context) (source.Stats, error) { return f.stats, f.err }
-func (f *fakeSource) Status(context.Context) source.Status        { return f.status }
+func (f *fakeSource) EventBuckets(context.Context, source.BucketQuery) (source.BucketSeries, error) {
+	return source.BucketSeries{}, f.err
+}
+
+func (f *fakeSource) Stats(context.Context) (source.Stats, error) {
+	if f.statsErr != nil {
+		return source.Stats{}, f.statsErr
+	}
+	return f.stats, f.err
+}
+
+func (f *fakeSource) Status(context.Context) source.Status { return f.status }
 
 // sampleEvent is a realistic decoded event used across the rendering tests.
 func sampleEvent() source.Event {
@@ -126,6 +155,83 @@ func TestIndexShowsUnhealthyBanner(t *testing.T) {
 	rec := get(t, newTestServer(t, src), "/")
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "database unreachable")
+}
+
+// leakedErrorDetail looks like a connection string, which is exactly the kind
+// of backend detail an error page must not show: the page is public and would
+// become a place to read credentials.
+const leakedErrorDetail = "dial postgres://sorovista:hunter2@db:5432/sorovista: connection refused"
+
+func TestIndexErrorRendersErrorPage(t *testing.T) {
+	tests := []struct {
+		name string
+		src  *fakeSource
+	}{
+		{"stats failure", &fakeSource{statsErr: errors.New(leakedErrorDetail)}},
+		{"recent events failure", &fakeSource{listEventsErr: errors.New(leakedErrorDetail)}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.src.status = source.Status{Mode: "rpc", Healthy: true}
+			// cmd/sorovista applies reqid.Middleware on the root router, so
+			// wrapping the UI here reproduces the stack a visitor sees.
+			h := reqid.Middleware(newTestServer(t, tt.src))
+
+			rec := get(t, h, "/")
+			require.Equal(t, http.StatusInternalServerError, rec.Code)
+
+			body := rec.Body.String()
+			assert.Contains(t, body, "Something went wrong")
+			assert.Contains(t, body, "Check the service logs")
+			assert.NotContains(t, body, "hunter2", "a backend error must not leak connection details")
+			assert.NotContains(t, body, "connection refused", "the raw error must stay in the logs")
+			assert.NotEmpty(t, rec.Header().Get(reqid.Header),
+				"an error response still carries the promised correlation header")
+		})
+	}
+}
+
+func TestContractDetailErrorRendersErrorPage(t *testing.T) {
+	src := &fakeSource{
+		contractStatsErr: errors.New("database exploded"),
+		status:           source.Status{Healthy: true},
+	}
+
+	rec := get(t, newTestServer(t, src), "/contracts/"+testContract)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+
+	body := rec.Body.String()
+	assert.Contains(t, body, "Something went wrong")
+	assert.NotContains(t, body, "database exploded", "the raw error must not reach the page")
+}
+
+func TestRenderUnknownPageReturns500(t *testing.T) {
+	s, err := New(&fakeSource{status: source.Status{Healthy: true}},
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+
+	// A page missing from the parsed set is a programming mistake; render must
+	// fail closed with a generic 500 rather than a half-written template.
+	delete(s.pages, "index")
+
+	rec := get(t, s.Routes(), "/")
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Contains(t, rec.Body.String(), "internal error")
+}
+
+func TestRenderExecutionErrorDoesNotPanic(t *testing.T) {
+	s, err := New(&fakeSource{status: source.Status{Healthy: true}},
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+
+	s.pages["index"] = template.Must(template.New("").Parse(`{{define "layout"}}partial output: {{.NoSuchField}}{{end}}`))
+
+	rec := get(t, s.Routes(), "/")
+	// The status is already on the wire when execution fails, so the only
+	// safe behaviour is to stop and log — not to panic or write a second code.
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "partial output:")
 }
 
 func TestContractsPageRenders(t *testing.T) {
@@ -234,11 +340,15 @@ func TestEventDetailShowsFailedCall(t *testing.T) {
 }
 
 func TestEventNotFound(t *testing.T) {
-	src := &fakeSource{err: source.ErrNotFound, status: source.Status{Healthy: true}}
+	src := &fakeSource{getEventErr: source.ErrNotFound, status: source.Status{Healthy: true}}
+	h := reqid.Middleware(newTestServer(t, src))
 
-	rec := get(t, newTestServer(t, src), "/events/missing")
+	rec := get(t, h, "/events/missing")
+	// A missing event is a 404 through the real source.ErrNotFound path, not
+	// the 500 a generic backend failure would produce.
 	require.Equal(t, http.StatusNotFound, rec.Code)
 	assert.Contains(t, rec.Body.String(), "Event not found")
+	assert.NotEmpty(t, rec.Header().Get(reqid.Header), "a 404 still carries the correlation header")
 }
 
 func TestSearchRouting(t *testing.T) {
@@ -290,12 +400,71 @@ func TestPartialEventsRejectsBadContract(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+func TestPartialRenderExecutionErrorDoesNotPanic(t *testing.T) {
+	s, err := New(&fakeSource{status: source.Status{Healthy: true}},
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+
+	s.partials = template.Must(template.New("").Parse(`{{define "events-table"}}partial output: {{.NoSuchField}}{{end}}`))
+
+	rec := get(t, s.Routes(), "/partials/events")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "partial output:")
+}
+
 func TestPartialEventsEmptyState(t *testing.T) {
 	src := &fakeSource{events: source.EventPage{}, status: source.Status{Healthy: true}}
 
 	rec := get(t, newTestServer(t, src), "/partials/events")
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "No events match these filters")
+}
+
+// TestRouteEdgeCases covers the inputs at the edges of what the UI routes
+// accept: a query that trims to nothing, a contract ID of the right length but
+// the wrong prefix, and a limit one past the maximum. Each is handled before
+// the source is consulted, so a bad request never costs a backend call.
+func TestRouteEdgeCases(t *testing.T) {
+	tests := []struct {
+		name         string
+		target       string
+		wantStatus   int
+		wantLocation string
+		wantBody     string
+	}{
+		{
+			name:         "whitespace-only search routes to the contracts list",
+			target:       "/search?q=%20%09",
+			wantStatus:   http.StatusSeeOther,
+			wantLocation: "/contracts",
+		},
+		{
+			name:       "a 56-character ID with the wrong prefix is rejected",
+			target:     "/contracts/G" + strings.Repeat("A", 55),
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "Invalid contract ID",
+		},
+		{
+			name:       "a limit one above the maximum is rejected",
+			target:     "/partials/events?limit=201",
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "limit must be an integer in [1,200]",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := &fakeSource{status: source.Status{Healthy: true}}
+			rec := get(t, newTestServer(t, src), tt.target)
+			require.Equal(t, tt.wantStatus, rec.Code)
+			if tt.wantLocation != "" {
+				assert.Equal(t, tt.wantLocation, rec.Header().Get("Location"))
+			}
+			if tt.wantBody != "" {
+				assert.Contains(t, rec.Body.String(), tt.wantBody)
+			}
+		})
+	}
 }
 
 func TestUnknownPathRenders404(t *testing.T) {

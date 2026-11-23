@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -43,7 +46,7 @@ func (s *Server) handleListContracts(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, "listing contracts", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, page)
+	writeConditionalJSON(w, r, contractPageETag(r, page), http.StatusOK, page)
 }
 
 func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
@@ -58,7 +61,8 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, "listing events", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, annotatedPage{Events: annotateEvents(page.Events), NextCursor: page.NextCursor})
+	writeConditionalJSON(w, r, eventPageETag(r, page), http.StatusOK,
+		annotatedPage{Events: annotateEvents(page.Events), NextCursor: page.NextCursor})
 }
 
 func (s *Server) handleContractEvents(w http.ResponseWriter, r *http.Request) {
@@ -80,7 +84,8 @@ func (s *Server) handleContractEvents(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, "listing contract events", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, annotatedPage{Events: annotateEvents(page.Events), NextCursor: page.NextCursor})
+	writeConditionalJSON(w, r, eventPageETag(r, page), http.StatusOK,
+		annotatedPage{Events: annotateEvents(page.Events), NextCursor: page.NextCursor})
 }
 
 // handleGetContract serves GET /api/contracts/{id}: one contract's summary —
@@ -127,7 +132,8 @@ func (s *Server) handleGetEvent(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, "loading event", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, annotatedEvent{Event: event, Token: DetectTokenEvent(event)})
+	writeConditionalJSON(w, r, eventETag(r, event), http.StatusOK,
+		annotatedEvent{Event: event, Token: DetectTokenEvent(event)})
 }
 
 // handleVersion serves the build information baked in via -ldflags, so a
@@ -147,6 +153,230 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, stats)
+}
+
+// handleEventStream serves GET /api/events/stream over Server-Sent Events.
+// It reuses the same filter parameters as GET /api/events (contract_id, type,
+// topic, tx_hash, from_ledger, to_ledger). In upstream mode (or when no broker
+// is wired), it responds with 501 Not Implemented rather than holding open a
+// silent stream that can never yield events.
+func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
+	q, err := EventQueryFromRequest(r)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err)
+		return
+	}
+	if cid := strings.TrimSpace(r.URL.Query().Get("contract_id")); cid != "" {
+		if !config.ValidContractID(cid) {
+			writeError(w, r, http.StatusBadRequest, fmt.Errorf("invalid contract ID %q", cid))
+			return
+		}
+		q.ContractID = cid
+	}
+
+	if s.src.Status(r.Context()).Mode == string(config.ModeSoroTrail) || s.broker == nil {
+		writeError(w, r, http.StatusNotImplemented,
+			errors.New("live event streaming is unavailable in upstream mode; poll GET /api/events with a cursor instead"))
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, r, http.StatusInternalServerError, errors.New("streaming not supported"))
+		return
+	}
+
+	ch, cancel := s.broker.Subscribe(q)
+	defer cancel()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	// Flush an immediate heartbeat comment so clients receive the 200 response
+	// headers without waiting for the first matching chain event.
+	if _, err := io.WriteString(w, ":hb\n\n"); err != nil {
+		return
+	}
+	flusher.Flush()
+
+	hbInterval := s.heartbeatInterval
+	if hbInterval <= 0 {
+		hbInterval = DefaultHeartbeatInterval
+	}
+	ticker := time.NewTicker(hbInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			if _, err := io.WriteString(w, ":hb\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		case ev, open := <-ch:
+			if !open {
+				return
+			}
+			payload, err := json.Marshal(annotatedEvent{
+				Event: ev,
+				Token: DetectTokenEvent(ev),
+			})
+			if err != nil {
+				continue
+			}
+			if _, err := fmt.Fprintf(w, "id: %s\nevent: event\ndata: %s\n\n", ev.ID, payload); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
+func (s *Server) handleEventBuckets(w http.ResponseWriter, r *http.Request) {
+	q, err := BucketQueryFromRequest(r)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err)
+		return
+	}
+
+	series, err := s.src.EventBuckets(r.Context(), q)
+	if err != nil {
+		s.fail(w, r, "loading event buckets", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, series)
+}
+
+func (s *Server) handleContractBuckets(w http.ResponseWriter, r *http.Request) {
+	contractID := chi.URLParam(r, "id")
+	if !config.ValidContractID(contractID) {
+		writeError(w, r, http.StatusBadRequest, fmt.Errorf("invalid contract ID %q", contractID))
+		return
+	}
+
+	q, err := BucketQueryFromRequest(r)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err)
+		return
+	}
+	q.ContractID = contractID
+
+	series, err := s.src.EventBuckets(r.Context(), q)
+	if err != nil {
+		s.fail(w, r, "loading contract event buckets", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, series)
+}
+
+// BucketQueryFromRequest parses and validates time-bucketed aggregation query
+// parameters: contract_id, type, topic, from, to, and interval. It enforces the
+// shared MaxBuckets cap so an unauthenticated caller cannot request a tiny
+// interval across a wide time span.
+func BucketQueryFromRequest(r *http.Request) (source.BucketQuery, error) {
+	params := r.URL.Query()
+	var q source.BucketQuery
+
+	if contractID := params.Get("contract_id"); contractID != "" {
+		if !config.ValidContractID(contractID) {
+			return q, fmt.Errorf("invalid contract_id %q", contractID)
+		}
+		q.ContractID = contractID
+	}
+
+	switch t := params.Get("type"); t {
+	case "", "contract", "system", "diagnostic":
+		q.Type = t
+	default:
+		return q, fmt.Errorf("invalid type %q (want contract, system or diagnostic)", t)
+	}
+
+	if topic := params.Get("topic"); topic != "" {
+		if json.Valid([]byte(topic)) {
+			q.Topic = json.RawMessage(topic)
+		} else {
+			encoded, err := json.Marshal(map[string]string{"symbol": topic})
+			if err != nil {
+				return q, fmt.Errorf("invalid topic: %w", err)
+			}
+			q.Topic = encoded
+		}
+	}
+
+	from, err := parseTimestamp(params.Get("from"), "from")
+	if err != nil {
+		return q, err
+	}
+	to, err := parseTimestamp(params.Get("to"), "to")
+	if err != nil {
+		return q, err
+	}
+	if from.After(to) {
+		return q, fmt.Errorf("from (%s) must not be after to (%s)", from.Format(time.RFC3339), to.Format(time.RFC3339))
+	}
+	q.From = from
+	q.To = to
+
+	interval, err := parseBucketInterval(params.Get("interval"))
+	if err != nil {
+		return q, err
+	}
+	q.Interval = interval
+
+	span := q.To.Sub(q.From)
+	buckets := int64(span / q.Interval)
+	if span%q.Interval != 0 {
+		buckets++
+	}
+	if buckets > source.MaxBuckets {
+		return q, fmt.Errorf("requested range produces %d buckets, exceeding maximum of %d", buckets, source.MaxBuckets)
+	}
+
+	return q, nil
+}
+
+func parseTimestamp(raw, name string) (time.Time, error) {
+	if raw == "" {
+		return time.Time{}, fmt.Errorf("%s is required (RFC3339 timestamp)", name)
+	}
+	t, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%s must be a valid RFC3339 timestamp", name)
+	}
+	return t.UTC(), nil
+}
+
+func parseBucketInterval(raw string) (time.Duration, error) {
+	if raw == "" {
+		return time.Hour, nil
+	}
+	var (
+		d   time.Duration
+		err error
+	)
+	if strings.HasSuffix(raw, "d") {
+		days, parseErr := strconv.Atoi(strings.TrimSuffix(raw, "d"))
+		if parseErr != nil || days <= 0 {
+			return 0, fmt.Errorf("invalid interval %q", raw)
+		}
+		d = time.Duration(days) * 24 * time.Hour
+	} else {
+		d, err = time.ParseDuration(raw)
+		if err != nil {
+			return 0, fmt.Errorf("invalid interval %q", raw)
+		}
+	}
+	if d < source.MinBucketInterval || d > source.MaxBucketInterval || d%time.Second != 0 {
+		return 0, fmt.Errorf("interval must be between %s and %s in whole seconds",
+			source.FormatBucketInterval(source.MinBucketInterval),
+			source.FormatBucketInterval(source.MaxBucketInterval))
+	}
+	return d, nil
 }
 
 // EventQueryFromRequest parses the event filter query parameters shared by the
@@ -191,10 +421,36 @@ func EventQueryFromRequest(r *http.Request) (source.EventQuery, error) {
 		return q, fmt.Errorf("from_ledger %d is after to_ledger %d", q.FromLedger, q.ToLedger)
 	}
 
+	if q.FromTime, err = parseOptionalTimestamp(params.Get("from_time"), "from_time"); err != nil {
+		return q, err
+	}
+	if q.ToTime, err = parseOptionalTimestamp(params.Get("to_time"), "to_time"); err != nil {
+		return q, err
+	}
+	if !q.FromTime.IsZero() && !q.ToTime.IsZero() && q.FromTime.After(q.ToTime) {
+		return q, fmt.Errorf("from_time %s is after to_time %s",
+			q.FromTime.Format(time.RFC3339), q.ToTime.Format(time.RFC3339))
+	}
+
 	if q.Limit, err = parseLimit(params.Get("limit")); err != nil {
 		return q, err
 	}
 	return q, nil
+}
+
+// parseOptionalTimestamp parses an RFC 3339 bound, treating an empty value as
+// "no constraint". A date without a time is rejected rather than silently
+// interpreted as midnight: at the upper bound that would exclude the whole of
+// the named day, which surprises people.
+func parseOptionalTimestamp(raw, name string) (time.Time, error) {
+	if raw == "" {
+		return time.Time{}, nil
+	}
+	t, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%s must be a valid RFC3339 timestamp", name)
+	}
+	return t.UTC(), nil
 }
 
 func parseLedger(raw, name string) (int64, error) {
