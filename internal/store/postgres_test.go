@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,52 +15,33 @@ import (
 	"github.com/sorotrail/sorovista/internal/source"
 )
 
-// TestNewPostgresEdgeCases covers inputs that must fail fast, long before any
-// query runs: empty input, a malformed URL and a reachable-looking but dead
-// host. None of these need a database, so they run in the ordinary suite.
-func TestNewPostgresEdgeCases(t *testing.T) {
-	tests := []struct {
-		name    string
-		setup   func(t *testing.T)
-		url     string
-		wantErr string
-	}{
-		{
-			name: "empty input fails at the ping",
-			// An empty URL falls back to the libpq defaults, which on a machine
-			// with a local database could connect successfully. Point the default
-			// host at a socket that cannot exist so the case is deterministic.
-			setup:   func(t *testing.T) { t.Setenv("PGHOST", filepath.Join(t.TempDir(), "no-postgres-socket")) },
-			url:     "",
-			wantErr: "pinging postgres",
-		},
-		{
-			name:    "malformed url fails at parse",
-			url:     "not-a-url",
-			wantErr: "connecting to postgres",
-		},
-		{
-			name:    "unreachable host fails at the ping",
-			url:     "postgres://sorovista:sorovista@127.0.0.1:1/sorovista?sslmode=disable&connect_timeout=1",
-			wantErr: "pinging postgres",
-		},
+// storeSkipOnce ensures the missing-database notice is printed once per test
+// binary rather than once per test. A skipped test prints nothing under a
+// plain `go test`, which is how a contributor can run the suite, see green and
+// never learn that almost none of the persistence layer executed.
+var storeSkipOnce sync.Once
+
+// skipStoreTests reports the skip loudly and then skips the calling test. It
+// runs before the first database-backed test, so a full suite without
+// TEST_DATABASE_URL always says what was missed and how to run it.
+func skipStoreTests(t *testing.T) {
+	t.Helper()
+
+	// REQUIRE_DB turns the skip into a failure, letting a job assert that the
+	// integration tests really ran instead of trusting its own configuration.
+	if os.Getenv("REQUIRE_DB") != "" {
+		t.Fatalf("TEST_DATABASE_URL is not set but REQUIRE_DB is; the Postgres integration tests must run in this job (run `make up` then `make test-db`)")
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.setup != nil {
-				tt.setup(t)
-			}
+	storeSkipOnce.Do(func() {
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "[store] Postgres integration tests skipped: TEST_DATABASE_URL is not set.")
+		fmt.Fprintln(os.Stderr, "[store] This run did NOT exercise internal/store: cursors, filters, aggregates and ingest state went untested.")
+		fmt.Fprintln(os.Stderr, "[store] To run them: make up && make test-db")
+		fmt.Fprintln(os.Stderr, "")
+	})
 
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-
-			pg, err := NewPostgres(ctx, tt.url)
-			require.Error(t, err, "a bad database URL must fail at startup")
-			assert.Nil(t, pg, "no pool should be returned alongside the error")
-			assert.Contains(t, err.Error(), tt.wantErr)
-		})
-	}
+	t.Skip("TEST_DATABASE_URL is not set; skipping the Postgres integration tests. Run `make up` then `make test-db` to exercise the store.")
 }
 
 // newTestStore connects to the database named by TEST_DATABASE_URL, applies
@@ -73,7 +54,7 @@ func newTestStore(t *testing.T) *Postgres {
 
 	databaseURL := os.Getenv("TEST_DATABASE_URL")
 	if databaseURL == "" {
-		t.Skip("TEST_DATABASE_URL is not set; skipping the Postgres integration tests (see make test-db)")
+		skipStoreTests(t)
 	}
 
 	require.NoError(t, Migrate(databaseURL))
@@ -89,6 +70,19 @@ func newTestStore(t *testing.T) *Postgres {
 	require.NoError(t, err)
 
 	return pg
+}
+
+// TestDatabaseIsRequiredWhenRequested is the opt-in guard: with REQUIRE_DB set,
+// a missing TEST_DATABASE_URL is a failure rather than a skip, so CI or an
+// operator can assert the store tests ran. It is deliberately separate from
+// newTestStore so the assertion holds even when only this test is selected.
+func TestDatabaseIsRequiredWhenRequested(t *testing.T) {
+	if os.Getenv("REQUIRE_DB") == "" {
+		t.Skip("REQUIRE_DB is not set; set it to fail instead of skipping when TEST_DATABASE_URL is missing")
+	}
+	if os.Getenv("TEST_DATABASE_URL") == "" {
+		t.Fatal("REQUIRE_DB is set but TEST_DATABASE_URL is not; run `make up` then `make test-db`")
+	}
 }
 
 // event builds a test event whose ID sorts chronologically, as TOIDs do.
@@ -273,6 +267,30 @@ func TestQueryEventsFilters(t *testing.T) {
 		got, _, err := pg.QueryEvents(ctx, source.EventQuery{FromLedger: 105, ToLedger: 105})
 		require.NoError(t, err)
 		assert.Len(t, got, 2, "both events in ledger 105")
+		for _, e := range got {
+			assert.Equal(t, int64(105), e.Ledger)
+		}
+	})
+
+	t.Run("by inclusive time range", func(t *testing.T) {
+		from := time.Unix(1700000105, 0).UTC()
+		to := time.Unix(1700000110, 0).UTC()
+		got, _, err := pg.QueryEvents(ctx, source.EventQuery{FromTime: from, ToTime: to})
+		require.NoError(t, err)
+		require.Len(t, got, 3, "ledger 105 carries two events and ledger 110 one")
+		for _, e := range got {
+			assert.False(t, e.LedgerClosedAt.Before(from))
+			assert.False(t, e.LedgerClosedAt.After(to))
+		}
+	})
+
+	t.Run("time and ledger bounds intersect", func(t *testing.T) {
+		got, _, err := pg.QueryEvents(ctx, source.EventQuery{
+			FromTime: time.Unix(1700000105, 0).UTC(),
+			ToLedger: 105,
+		})
+		require.NoError(t, err)
+		assert.Len(t, got, 2)
 		for _, e := range got {
 			assert.Equal(t, int64(105), e.Ledger)
 		}

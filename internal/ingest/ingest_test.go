@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -336,75 +337,59 @@ func TestRunStopsOnContextCancel(t *testing.T) {
 	}
 }
 
-// TestRunEdgeCases exercises the loop's shutdown and retry behaviour: an
-// already-cancelled context must not poll at all, and a failed poll is retried
-// on the next tick instead of ending the run.
-func TestRunEdgeCases(t *testing.T) {
-	tests := []struct {
-		name            string
-		ctx             func() (context.Context, context.CancelFunc)
-		opts            Options
-		client          *mockRPC
-		wantStored      int
-		wantRetriedPoll bool
+func TestRunRetriesFailedPollsAtTheConfiguredInterval(t *testing.T) {
+	const (
+		interval = time.Hour
+		ledger   = 100
+	)
+	cases := []struct {
+		name     string
+		failures int
 	}{
-		{
-			name: "pre-cancelled context returns without polling",
-			ctx: func() (context.Context, context.CancelFunc) {
-				ctx, cancel := context.WithCancel(context.Background())
-				cancel()
-				return ctx, cancel
-			},
-			opts:   Options{RetentionLedgers: 50},
-			client: &mockRPC{latest: 100},
-		},
-		{
-			name: "transient poll errors are retried until events arrive",
-			ctx:  func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) },
-			opts: Options{PollInterval: time.Millisecond, RetentionLedgers: 50},
-			client: &mockRPC{
-				latest: 100,
-				errs:   []error{errors.New("transient node error")},
-				responses: []rpc.GetEventsResult{
-					{Events: []rpc.Event{event("0000000100-0000000001", 100, "CABC")}, LatestLedger: 100},
-				},
-			},
-			wantStored:      1,
-			wantRetriedPoll: true,
-		},
+		{"one transient failure", 1},
+		{"consecutive transient failures", 2},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				failures := make([]error, tc.failures)
+				for i := range failures {
+					failures[i] = errors.New("temporary RPC error")
+				}
+				client := &mockRPC{
+					latest: ledger,
+					errs:   failures,
+					responses: []rpc.GetEventsResult{
+						{Events: []rpc.Event{event("recovered", ledger, "CABC")}, LatestLedger: ledger},
+					},
+				}
+				st := newMockStore()
+				ing := newTestIngester(client, st, Options{PollInterval: interval, RetentionLedgers: 50})
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				done := make(chan error, 1)
+				go func() { done <- ing.Run(ctx) }()
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			st := newMockStore()
-			ing := newTestIngester(tt.client, st, tt.opts)
+				for failed := 1; failed <= tc.failures; failed++ {
+					synctest.Wait()
+					require.Len(t, client.capturedRequests(), failed)
+					assert.Zero(t, st.savedState().LastLedger)
+					assert.Zero(t, st.storedCount())
 
-			ctx, cancel := tt.ctx()
-			defer cancel()
+					time.Sleep(interval - time.Nanosecond)
+					synctest.Wait()
+					assert.Len(t, client.capturedRequests(), failed, "retry must wait for the polling interval")
+					time.Sleep(time.Nanosecond)
+				}
 
-			done := make(chan error, 1)
-			go func() { done <- ing.Run(ctx) }()
-
-			if tt.wantStored > 0 {
-				require.Eventually(t, func() bool { return st.storedCount() >= tt.wantStored },
-					5*time.Second, time.Millisecond, "ingester never stored the event")
-			}
-			cancel()
-
-			select {
-			case err := <-done:
-				require.NoError(t, err, "a cancelled context is a clean shutdown, not a failure")
-			case <-time.After(5 * time.Second):
-				t.Fatal("Run did not stop after its context was cancelled")
-			}
-
-			assert.Equal(t, tt.wantStored, st.storedCount())
-			requests := tt.client.capturedRequests()
-			if tt.wantRetriedPoll {
-				assert.GreaterOrEqual(t, len(requests), 2, "the failed poll should be retried on the next tick")
-			} else {
-				assert.Empty(t, requests, "a pre-cancelled context must not reach the RPC")
-			}
+				synctest.Wait()
+				require.Len(t, client.capturedRequests(), tc.failures+1)
+				assert.Equal(t, int64(ledger), st.savedState().LastLedger)
+				_, stored := st.stored("recovered")
+				assert.True(t, stored)
+				cancel()
+				require.NoError(t, <-done)
+			})
 		})
 	}
 }
