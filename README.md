@@ -7,6 +7,10 @@ not show well is **decoded Soroban contract event data** — what a contract
 actually emitted, with human-readable topics and values, browsable and
 filterable. SoroVista is a focused, self-hostable explorer for exactly that.
 
+[![Go Reference](https://img.shields.io/badge/go-1.26.0-00ADD8?logo=go)](https://pkg.go.dev/github.com/sorotrail/sorovista)
+[![CI](https://img.shields.io/github/actions/workflow/status/sorotrail/SoroVista/ci.yml?branch=main)](https://github.com/sorotrail/SoroVista/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](https://github.com/sorotrail/SoroVista/blob/main/LICENSE)
+
 Point it at a network, and browse contracts, inspect their decoded events, and
 filter across them in a small server-rendered web UI. Everything the UI shows is
 also available as JSON, so SoroVista doubles as a queryable API.
@@ -69,7 +73,8 @@ docker compose up --build
 
 This starts Postgres and SoroVista against the public Stellar testnet. The UI is
 on <http://localhost:8080>; watch the logs to see events arrive. Migrations run
-automatically at startup.
+automatically at startup. A fresh standalone instance starts empty — it has
+ingested no events yet — until the poll loop picks them up from the RPC.
 
 To watch specific contracts instead of everything:
 
