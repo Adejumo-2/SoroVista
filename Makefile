@@ -1,4 +1,4 @@
-.PHONY: build run test test-db lint fmt vet ci up down clean
+.PHONY: build run test test-race test-db lint fmt up down clean
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
@@ -30,6 +30,9 @@ vet:
 # Everything CI runs. test-db is separate because it needs Postgres, and stays
 # the authority for coverage of the store.
 ci: build vet test lint
+
+test-race:
+	go test -race ./...
 
 # Run every test including the Postgres integration tests, against the
 # docker-compose database (make up first, or point at your own Postgres).
