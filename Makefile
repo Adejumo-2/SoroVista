@@ -10,8 +10,26 @@ build:
 run: build
 	./bin/sorovista
 
+# A successful `go test` discards the test binary's output, so the notice
+# printed by internal/store's skip helper is invisible here. Print it from the
+# make target instead, where a database-less run always shows it.
+# -count=1 disables the test cache too: a cached result would never execute the
+# store package at all.
 test:
-	go test ./...
+	@if [ -z "$$TEST_DATABASE_URL" ]; then \
+		echo ""; \
+		echo "[store] Postgres integration tests skipped: TEST_DATABASE_URL is not set."; \
+		echo "[store] This run does NOT exercise internal/store. To run them: make up && make test-db"; \
+		echo ""; \
+	fi
+	go test -count=1 ./...
+
+vet:
+	go vet ./...
+
+# Everything CI runs. test-db is separate because it needs Postgres, and stays
+# the authority for coverage of the store.
+ci: build vet test lint
 
 test-race:
 	go test -race ./...

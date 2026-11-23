@@ -20,9 +20,28 @@ make test-db   # everything, against the compose Postgres
 make run
 ```
 
-`make test` passes without a database: the Postgres integration tests skip
-themselves when `TEST_DATABASE_URL` is unset. Please run `make test-db` before
-opening a pull request that touches the store.
+`make test` passes without a database, but **a green `make test` does not cover
+the store**. The Postgres integration tests in `internal/store` skip themselves
+when `TEST_DATABASE_URL` is unset, and skipped tests count as uncovered — so a
+database-less run exercises almost none of the persistence layer: cursors,
+filters, aggregates and both ingest-state methods all go unrun. The run prints
+`[store] Postgres integration tests skipped` to make that explicit.
+
+Before opening a pull request that touches the store, start Postgres and run the
+full suite against it:
+
+```sh
+make up
+make test-db
+```
+
+`make test-db` is the authority: it runs the whole suite against the
+docker-compose Postgres. `make ci` runs the same database-less checks as CI's
+build job, so it prints the same notice.
+
+Set `REQUIRE_DB=1` to make a missing `TEST_DATABASE_URL` fail instead of skip,
+so a job can assert that the database tests really ran rather than trusting its
+own configuration.
 
 Run `make fmt` and `make lint` before pushing.
 
@@ -100,6 +119,13 @@ SoroVista, and both are visible in `internal/source/sorotrailsource`:
 Contributions to SoroTrail that fix either would let a lot of code here be
 deleted, which is the best kind of contribution.
 
+## Code of conduct
+
+Participation in this project is covered by the
+[Code of Conduct](CODE_OF_CONDUCT.md), which says how to report unacceptable
+behaviour and what happens next. Security vulnerabilities are a separate
+channel: see [SECURITY.md](SECURITY.md) rather than the conduct process.
+
 ## Pull requests
 
 - One logical change per pull request.
@@ -110,6 +136,16 @@ deleted, which is the best kind of contribution.
   production.
 - Update the README if you change configuration or the API surface.
 - Explain the why in the description. The what is visible in the diff.
+
+**Example:** check everything, then open a pull request that closes its issue:
+
+```sh
+git checkout -b feature/descending-pagination
+make fmt && make lint && make test
+git commit -m "sorotrailsource: add descending pagination"
+gh pr create --title "Add descending pagination" \
+  --body "Closes #123. Test output: make test-db passes against the compose Postgres."
+```
 
 ## Reporting bugs
 

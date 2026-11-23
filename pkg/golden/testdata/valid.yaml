@@ -1,0 +1,16 @@
+cases:
+  - name: greeting
+    template: "Hello, {{.name}}!"
+    values:
+      name: SoroVista
+    expected: "Hello, SoroVista!"
+
+  - name: ledger number
+    template: "ledger {{.ledger}}"
+    values:
+      ledger: 42
+    expected: "ledger 42"
+
+  - name: empty values
+    template: "constant"
+    expected: "constant"
