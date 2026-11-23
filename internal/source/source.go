@@ -23,6 +23,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"regexp"
 	"time"
 )
 
@@ -31,11 +33,14 @@ import (
 // to a 404 without knowing which backend produced it.
 var ErrNotFound = errors.New("not found")
 
-// Paging limits shared by every implementation, so a page size means the same
-// thing regardless of which backend serves it.
+// Paging and aggregation limits shared by every implementation, so bounds mean
+// the same thing regardless of which backend serves the request.
 const (
-	DefaultLimit = 50
-	MaxLimit     = 200
+	DefaultLimit      = 50
+	MaxLimit          = 200
+	MaxBuckets        = 500
+	MinBucketInterval = time.Minute
+	MaxBucketInterval = 7 * 24 * time.Hour
 )
 
 // Event is one Soroban contract event.
@@ -86,6 +91,17 @@ type EventQuery struct {
 	Topic      json.RawMessage
 	FromLedger int64 // inclusive
 	ToLedger   int64 // inclusive
+	// FromTime and ToTime bound events by their on-chain ledger close time
+	// (LedgerClosedAt), both inclusive. Zero means no constraint. They
+	// intersect with the ledger bounds when both kinds are supplied, so an
+	// event must satisfy every bound to match.
+	//
+	// These deliberately filter on LedgerClosedAt rather than CreatedAt: a
+	// backfilled row's ingest time is unrelated to when the event happened, so
+	// filtering on CreatedAt would give different answers on a backfilled
+	// instance than on a live one.
+	FromTime time.Time
+	ToTime   time.Time
 	// Cursor continues a previous page. It is opaque: only the implementation
 	// that produced it may interpret it.
 	Cursor string
@@ -145,13 +161,80 @@ type ContractStats struct {
 	Approximate   bool        `json:"approximate"`
 }
 
+// BucketQuery specifies a time-bucketed event count aggregation over the
+// half-open time range [From, To), partitioned into contiguous half-open
+// [Start, End) intervals of width Interval anchored at From.
+//
+// Events are bucketed by their on-chain ledger close timestamp
+// (ledger_closed_at), not the local ingestion timestamp (created_at), so
+// backfilled or delayed ingestion never distorts the activity timeline.
+type BucketQuery struct {
+	ContractID string
+	Type       string
+	Topic      json.RawMessage
+	From       time.Time
+	To         time.Time
+	Interval   time.Duration
+}
+
+// EventBucket is one half-open time slice [Start, End) and its event count.
+type EventBucket struct {
+	Start time.Time `json:"start"`
+	End   time.Time `json:"end"`
+	Count int64     `json:"count"`
+}
+
+// BucketSeries is the response payload for time-bucketed event counts.
+type BucketSeries struct {
+	Interval    string        `json:"interval"`
+	From        time.Time     `json:"from"`
+	To          time.Time     `json:"to"`
+	TotalEvents int64         `json:"total_events"`
+	Buckets     []EventBucket `json:"buckets"`
+	// Approximate is true when the buckets were derived from a bounded scan in
+	// upstream mode rather than an exact SQL aggregate.
+	Approximate bool `json:"approximate"`
+}
+
+// Severity values for Dependency.Severity. They let a caller or alert rule
+// tell a total outage from a partial one: an unreachable database means
+// SoroVista can serve nothing, while an unreachable RPC only stalls ingestion
+// and still leaves every stored event queryable.
+const (
+	// DependencyFatal means losing this dependency breaks the read paths.
+	DependencyFatal = "fatal"
+	// DependencyDegraded means the dependency is down but the explorer can
+	// still serve useful data from what it already holds.
+	DependencyDegraded = "degraded"
+)
+
+// Dependency is one backend component's health, reported separately so an
+// operator can see which of several checks failed without reading logs. Which
+// dependencies appear is decided by the EventSource: standalone mode reports
+// Postgres and Stellar RPC, upstream mode reports the SoroTrail indexer.
+type Dependency struct {
+	// Name is a stable machine-readable identifier such as "postgres" or
+	// "stellar_rpc". Treat it as part of the API contract.
+	Name string `json:"name"`
+	// Healthy is false when this dependency is unreachable or degraded.
+	Healthy bool `json:"healthy"`
+	// Severity is DependencyFatal or DependencyDegraded, and says what this
+	// dependency's failure means for the instance, not whether it is
+	// currently failing.
+	Severity string `json:"severity"`
+	// Detail explains a failure in sanitized, human-readable terms. It must
+	// never include credentials.
+	Detail string `json:"detail,omitempty"`
+}
+
 // Status describes a source's health and the extent of the history it holds.
 // The UI shows this prominently: standalone mode only sees events emitted
 // while it was running, which surprises people who expect a full explorer.
 type Status struct {
 	// Mode is the configured SOURCE_MODE, "rpc" or "sorotrail".
 	Mode string `json:"mode"`
-	// Healthy is false when the backend is unreachable or degraded.
+	// Healthy is false when any dependency is unreachable or degraded. It is
+	// the overall verdict: Dependencies carries the per-component breakdown.
 	Healthy bool `json:"healthy"`
 	// Detail explains an unhealthy status, or adds context to a healthy one.
 	Detail string `json:"detail,omitempty"`
@@ -160,6 +243,27 @@ type Status struct {
 	// RetentionNote is a human-readable caveat about history coverage, shown
 	// in the UI banner.
 	RetentionNote string `json:"retention_note,omitempty"`
+	// Dependencies is the per-component health breakdown. It is omitted only
+	// when an implementation reports no dependency checks at all.
+	Dependencies []Dependency `json:"dependencies,omitempty"`
+}
+
+var (
+	// urlUserinfo strips the user:password@ part of any URL embedded in an
+	// error, which is where a Postgres connection string carries credentials.
+	urlUserinfo = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.\-]*://)[^@/\s]+@`)
+	// credentialKV strips DSN-style key=value credentials, which pgx can
+	// quote in connection errors.
+	credentialKV = regexp.MustCompile(`(?i)\b(password|passwd|pwd|passfile|secret|token)\s*=\s*[^\s&;]+`)
+)
+
+// SanitizeDetail removes credentials from a detail string. Health responses
+// are unauthenticated, and a connection error can quote a connection string,
+// so every implementation must pass detail through this before reporting it.
+func SanitizeDetail(s string) string {
+	s = urlUserinfo.ReplaceAllString(s, "${1}[redacted]@")
+	s = credentialKV.ReplaceAllString(s, "${1}=[redacted]")
+	return s
 }
 
 // EventSource is the read-only interface every backend implements. All methods
@@ -173,6 +277,9 @@ type EventSource interface {
 	GetEvent(ctx context.Context, id string) (Event, error)
 	// ContractStats summarizes one contract.
 	ContractStats(ctx context.Context, contractID string) (ContractStats, error)
+	// EventBuckets aggregates event counts into contiguous half-open [Start, End)
+	// time buckets over [q.From, q.To) by on-chain ledger_closed_at time.
+	EventBuckets(ctx context.Context, q BucketQuery) (BucketSeries, error)
 	// Stats summarizes everything visible to this source.
 	Stats(ctx context.Context) (Stats, error)
 	// Status reports health and history coverage. It must not return an error:
@@ -191,4 +298,81 @@ func NormalizeLimit(limit int) int {
 	default:
 		return limit
 	}
+}
+
+// FormatBucketInterval formats a bucket duration using its cleanest whole unit
+// (e.g. "15m", "1h") rather than time.Duration.String()'s trailing zeroes.
+func FormatBucketInterval(d time.Duration) string {
+	switch {
+	case d <= 0:
+		return "0s"
+	case d%time.Hour == 0:
+		return fmt.Sprintf("%dh", int64(d/time.Hour))
+	case d%time.Minute == 0:
+		return fmt.Sprintf("%dm", int64(d/time.Minute))
+	case d%time.Second == 0:
+		return fmt.Sprintf("%ds", int64(d/time.Second))
+	default:
+		return d.String()
+	}
+}
+
+// BuildEmptyBuckets constructs the contiguous sequence of half-open [Start, End)
+// buckets covering [from, to) in steps of interval. Empty ranges (from >= to or
+// interval <= 0) return an empty non-nil slice.
+func BuildEmptyBuckets(from, to time.Time, interval time.Duration) []EventBucket {
+	from = from.UTC()
+	to = to.UTC()
+	if !from.Before(to) || interval <= 0 {
+		return []EventBucket{}
+	}
+	span := to.Sub(from)
+	n := int(span / interval)
+	if span%interval != 0 {
+		n++
+	}
+	buckets := make([]EventBucket, 0, n)
+	for start := from; start.Before(to); start = start.Add(interval) {
+		end := start.Add(interval)
+		if end.After(to) {
+			end = to
+		}
+		buckets = append(buckets, EventBucket{
+			Start: start,
+			End:   end,
+			Count: 0,
+		})
+	}
+	return buckets
+}
+
+// CountEventsIntoBuckets tallies events whose on-chain LedgerClosedAt timestamp
+// (falling back to CreatedAt when LedgerClosedAt is zero) lies within the
+// half-open range [from, to) into contiguous [Start, End) buckets of width
+// interval. Events with t == bucket.Start land in that bucket; events with
+// t == bucket.End land in the next bucket (or are excluded when bucket.End == to).
+func CountEventsIntoBuckets(from, to time.Time, interval time.Duration, events []Event) ([]EventBucket, int64) {
+	from = from.UTC()
+	to = to.UTC()
+	buckets := BuildEmptyBuckets(from, to, interval)
+	if len(buckets) == 0 {
+		return buckets, 0
+	}
+	var total int64
+	for _, e := range events {
+		ts := e.LedgerClosedAt
+		if ts.IsZero() {
+			ts = e.CreatedAt
+		}
+		ts = ts.UTC()
+		if ts.Before(from) || !ts.Before(to) {
+			continue
+		}
+		idx := int(ts.Sub(from) / interval)
+		if idx >= 0 && idx < len(buckets) {
+			buckets[idx].Count++
+			total++
+		}
+	}
+	return buckets, total
 }

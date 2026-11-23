@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +14,35 @@ import (
 
 	"github.com/sorotrail/sorovista/internal/source"
 )
+
+// storeSkipOnce ensures the missing-database notice is printed once per test
+// binary rather than once per test. A skipped test prints nothing under a
+// plain `go test`, which is how a contributor can run the suite, see green and
+// never learn that almost none of the persistence layer executed.
+var storeSkipOnce sync.Once
+
+// skipStoreTests reports the skip loudly and then skips the calling test. It
+// runs before the first database-backed test, so a full suite without
+// TEST_DATABASE_URL always says what was missed and how to run it.
+func skipStoreTests(t *testing.T) {
+	t.Helper()
+
+	// REQUIRE_DB turns the skip into a failure, letting a job assert that the
+	// integration tests really ran instead of trusting its own configuration.
+	if os.Getenv("REQUIRE_DB") != "" {
+		t.Fatalf("TEST_DATABASE_URL is not set but REQUIRE_DB is; the Postgres integration tests must run in this job (run `make up` then `make test-db`)")
+	}
+
+	storeSkipOnce.Do(func() {
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "[store] Postgres integration tests skipped: TEST_DATABASE_URL is not set.")
+		fmt.Fprintln(os.Stderr, "[store] This run did NOT exercise internal/store: cursors, filters, aggregates and ingest state went untested.")
+		fmt.Fprintln(os.Stderr, "[store] To run them: make up && make test-db")
+		fmt.Fprintln(os.Stderr, "")
+	})
+
+	t.Skip("TEST_DATABASE_URL is not set; skipping the Postgres integration tests. Run `make up` then `make test-db` to exercise the store.")
+}
 
 // newTestStore connects to the database named by TEST_DATABASE_URL, applies
 // the migrations and truncates the tables. Without that variable the whole
@@ -24,7 +54,7 @@ func newTestStore(t *testing.T) *Postgres {
 
 	databaseURL := os.Getenv("TEST_DATABASE_URL")
 	if databaseURL == "" {
-		t.Skip("TEST_DATABASE_URL is not set; skipping the Postgres integration tests (see make test-db)")
+		skipStoreTests(t)
 	}
 
 	require.NoError(t, Migrate(databaseURL))
@@ -40,6 +70,19 @@ func newTestStore(t *testing.T) *Postgres {
 	require.NoError(t, err)
 
 	return pg
+}
+
+// TestDatabaseIsRequiredWhenRequested is the opt-in guard: with REQUIRE_DB set,
+// a missing TEST_DATABASE_URL is a failure rather than a skip, so CI or an
+// operator can assert the store tests ran. It is deliberately separate from
+// newTestStore so the assertion holds even when only this test is selected.
+func TestDatabaseIsRequiredWhenRequested(t *testing.T) {
+	if os.Getenv("REQUIRE_DB") == "" {
+		t.Skip("REQUIRE_DB is not set; set it to fail instead of skipping when TEST_DATABASE_URL is missing")
+	}
+	if os.Getenv("TEST_DATABASE_URL") == "" {
+		t.Fatal("REQUIRE_DB is set but TEST_DATABASE_URL is not; run `make up` then `make test-db`")
+	}
 }
 
 // event builds a test event whose ID sorts chronologically, as TOIDs do.
@@ -224,6 +267,30 @@ func TestQueryEventsFilters(t *testing.T) {
 		got, _, err := pg.QueryEvents(ctx, source.EventQuery{FromLedger: 105, ToLedger: 105})
 		require.NoError(t, err)
 		assert.Len(t, got, 2, "both events in ledger 105")
+		for _, e := range got {
+			assert.Equal(t, int64(105), e.Ledger)
+		}
+	})
+
+	t.Run("by inclusive time range", func(t *testing.T) {
+		from := time.Unix(1700000105, 0).UTC()
+		to := time.Unix(1700000110, 0).UTC()
+		got, _, err := pg.QueryEvents(ctx, source.EventQuery{FromTime: from, ToTime: to})
+		require.NoError(t, err)
+		require.Len(t, got, 3, "ledger 105 carries two events and ledger 110 one")
+		for _, e := range got {
+			assert.False(t, e.LedgerClosedAt.Before(from))
+			assert.False(t, e.LedgerClosedAt.After(to))
+		}
+	})
+
+	t.Run("time and ledger bounds intersect", func(t *testing.T) {
+		got, _, err := pg.QueryEvents(ctx, source.EventQuery{
+			FromTime: time.Unix(1700000105, 0).UTC(),
+			ToLedger: 105,
+		})
+		require.NoError(t, err)
+		assert.Len(t, got, 2)
 		for _, e := range got {
 			assert.Equal(t, int64(105), e.Ledger)
 		}
@@ -425,6 +492,77 @@ func TestStats(t *testing.T) {
 	assert.Equal(t, int64(200), got.LastLedger)
 	assert.False(t, got.Approximate)
 	require.Len(t, got.TypeBreakdown, 1)
+}
+
+func TestEventBuckets(t *testing.T) {
+	pg := newTestStore(t)
+	ctx := context.Background()
+
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	mk := func(seq int, contract, typ string, at time.Time) source.Event {
+		e := event(int64(100+seq), seq, contract)
+		e.Type = typ
+		e.LedgerClosedAt = at
+		return e
+	}
+
+	_, err := pg.UpsertEvents(ctx, []source.Event{
+		mk(1, "CAAA", "contract", base),                                     // bucket 0 start boundary (included)
+		mk(2, "CAAA", "contract", base.Add(30*time.Second)),                 // bucket 0 interior
+		mk(3, "CAAA", "contract", base.Add(time.Minute)),                    // bucket 1 start boundary (excluded from 0, included in 1)
+		mk(4, "CAAA", "diagnostic", base.Add(3*time.Minute+10*time.Second)), // bucket 3 (bucket 2 is a 0-count gap)
+		mk(5, "CBBB", "contract", base.Add(4*time.Minute)),                  // Exact upper bound 'to' for 4m range (excluded)
+	})
+	require.NoError(t, err)
+
+	t.Run("boundary alignment and zero-count gaps in SQL", func(t *testing.T) {
+		series, err := pg.EventBuckets(ctx, source.BucketQuery{
+			From:     base,
+			To:       base.Add(4 * time.Minute),
+			Interval: time.Minute,
+		})
+		require.NoError(t, err)
+		require.Len(t, series.Buckets, 4)
+		assert.Equal(t, int64(2), series.Buckets[0].Count)
+		assert.Equal(t, int64(1), series.Buckets[1].Count)
+		assert.Equal(t, int64(0), series.Buckets[2].Count, "empty bucket must be present with count 0")
+		assert.Equal(t, int64(1), series.Buckets[3].Count)
+		assert.Equal(t, int64(4), series.TotalEvents, "event at exact upper bound 'to' must be excluded")
+	})
+
+	t.Run("empty range returns empty buckets", func(t *testing.T) {
+		series, err := pg.EventBuckets(ctx, source.BucketQuery{
+			From:     base,
+			To:       base,
+			Interval: time.Minute,
+		})
+		require.NoError(t, err)
+		assert.Empty(t, series.Buckets)
+		assert.Zero(t, series.TotalEvents)
+	})
+
+	t.Run("bucket totals agree with Stats and ContractStats over full range", func(t *testing.T) {
+		allSeries, err := pg.EventBuckets(ctx, source.BucketQuery{
+			From:     base,
+			To:       base.Add(5 * time.Minute),
+			Interval: time.Minute,
+		})
+		require.NoError(t, err)
+		stats, err := pg.Stats(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, stats.TotalEvents, allSeries.TotalEvents)
+
+		contractSeries, err := pg.EventBuckets(ctx, source.BucketQuery{
+			ContractID: "CAAA",
+			From:       base,
+			To:         base.Add(5 * time.Minute),
+			Interval:   time.Minute,
+		})
+		require.NoError(t, err)
+		cStats, err := pg.ContractStats(ctx, "CAAA")
+		require.NoError(t, err)
+		assert.Equal(t, cStats.TotalEvents, contractSeries.TotalEvents)
+	})
 }
 
 func TestIngestState(t *testing.T) {

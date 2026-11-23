@@ -9,11 +9,14 @@ import (
 	"log/slog"
 	"time"
 
+	"go.opentelemetry.io/otel/codes"
+
 	"github.com/sorotrail/sorovista/internal/decode"
 	"github.com/sorotrail/sorovista/internal/metrics"
 	"github.com/sorotrail/sorovista/internal/rpc"
 	"github.com/sorotrail/sorovista/internal/source"
 	"github.com/sorotrail/sorovista/internal/store"
+	"github.com/sorotrail/sorovista/internal/tracing"
 )
 
 // MaxPagesPerBatch bounds how many cursor pages one batch may follow in a
@@ -35,6 +38,12 @@ type Options struct {
 	RetentionLedgers uint32
 }
 
+// EventPublisher receives newly ingested events after they have been persisted
+// to the store. Implementations must not block the caller.
+type EventPublisher interface {
+	Publish(events []source.Event)
+}
+
 // Ingester polls the RPC and persists what it finds.
 type Ingester struct {
 	rpc     rpc.Client
@@ -44,6 +53,9 @@ type Ingester struct {
 	log     *slog.Logger
 	// metrics is optional instrumentation; nil-safe, see internal/metrics.
 	metrics *metrics.Metrics
+	// tracer is optional instrumentation; nil-safe, see internal/tracing.
+	tracer    *tracing.Tracer
+	publisher EventPublisher
 }
 
 // New builds an Ingester.
@@ -57,6 +69,20 @@ func New(client rpc.Client, st store.Store, dec decode.Decoder, opts Options, lo
 // WithMetrics attaches Prometheus instrumentation to the ingest loop.
 func (i *Ingester) WithMetrics(m *metrics.Metrics) *Ingester {
 	i.metrics = m
+	return i
+}
+
+// WithTracer attaches OpenTelemetry tracing, which wraps each poll cycle in a
+// span. A nil tracer records nothing.
+func (i *Ingester) WithTracer(t *tracing.Tracer) *Ingester {
+	i.tracer = t
+	return i
+}
+
+// WithPublisher attaches a non-blocking live event publisher (such as the SSE
+// Broker) to be notified after each batch is stored.
+func (i *Ingester) WithPublisher(p EventPublisher) *Ingester {
+	i.publisher = p
 	return i
 }
 
@@ -86,7 +112,15 @@ func (i *Ingester) Run(ctx context.Context) error {
 		}
 
 		start := time.Now()
-		err := i.pollOnce(ctx)
+		// One span per poll cycle ties the RPC calls and store writes of a poll
+		// to the lag and duration metrics recorded just below.
+		pollCtx, span := i.tracer.Start(ctx, "ingest.poll")
+		err := i.pollOnce(pollCtx)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		}
+		span.End()
 		i.metrics.RecordPoll(err == nil, time.Since(start))
 		if err != nil {
 			if ctx.Err() != nil {
@@ -186,6 +220,9 @@ func (i *Ingester) ingestBatch(ctx context.Context, filters []rpc.EventFilter, s
 			return inserted, err
 		}
 		inserted += n
+		if i.publisher != nil && len(events) > 0 {
+			i.publisher.Publish(events)
+		}
 
 		// A short page means the stream is drained for now.
 		if len(res.Events) < rpc.DefaultEventsLimit {

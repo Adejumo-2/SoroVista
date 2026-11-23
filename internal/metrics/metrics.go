@@ -26,6 +26,7 @@ type Metrics struct {
 	eventsIngested prometheus.Counter
 	sincePollSec   prometheus.Gauge
 	httpDuration   *prometheus.HistogramVec
+	rateLimited    prometheus.Counter
 }
 
 // New returns a Metrics with its own registry, so multiple instances (e.g.
@@ -65,9 +66,14 @@ func New() *Metrics {
 			Help:    "HTTP request duration by route pattern, method and status.",
 			Buckets: prometheus.DefBuckets,
 		}, []string{"route", "method", "status"}),
+
+		rateLimited: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "sorovista_http_rate_limited_total",
+			Help: "Requests rejected by the per-client rate limiter.",
+		}),
 	}
 	m.registry.MustRegister(m.pollsTotal, m.pollDuration, m.pollLag,
-		m.eventsIngested, m.sincePollSec, m.httpDuration)
+		m.eventsIngested, m.sincePollSec, m.httpDuration, m.rateLimited)
 	return m
 }
 
@@ -107,6 +113,15 @@ func (m *Metrics) TickPollAge(secondsSince float64) {
 	m.sincePollSec.Set(secondsSince)
 }
 
+// RecordRateLimitRejection counts one request rejected with 429, so an
+// operator can distinguish a tight limit from genuine abuse.
+func (m *Metrics) RecordRateLimitRejection() {
+	if m == nil {
+		return
+	}
+	m.rateLimited.Inc()
+}
+
 // RecordEvents counts events stored by the cycle that just ran.
 func (m *Metrics) RecordEvents(count int64) {
 	if m == nil {
@@ -125,6 +140,19 @@ type statusRecorder struct {
 func (r *statusRecorder) WriteHeader(code int) {
 	r.status = code
 	r.ResponseWriter.WriteHeader(code)
+}
+
+// Flush forwards http.Flusher so Server-Sent Events handlers behind Middleware
+// can flush each frame to the client immediately.
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap exposes the underlying ResponseWriter for http.ResponseController.
+func (r *statusRecorder) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
 }
 
 // Middleware wraps a handler with per-route HTTP duration instrumentation.
