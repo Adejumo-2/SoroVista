@@ -26,6 +26,7 @@ type Metrics struct {
 	eventsIngested prometheus.Counter
 	sincePollSec   prometheus.Gauge
 	httpDuration   *prometheus.HistogramVec
+	rateLimited    prometheus.Counter
 
 	routePattern func(*http.Request) string
 }

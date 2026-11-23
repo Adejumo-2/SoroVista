@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sorotrail/sorovista/internal/config"
 	"github.com/sorotrail/sorovista/internal/metrics"
 	"github.com/sorotrail/sorovista/internal/source"
 )
@@ -34,6 +35,10 @@ func (stubSource) ContractStats(context.Context, string) (source.ContractStats, 
 	return source.ContractStats{}, nil
 }
 
+func (stubSource) EventBuckets(context.Context, source.BucketQuery) (source.BucketSeries, error) {
+	return source.BucketSeries{}, nil
+}
+
 func (stubSource) Stats(context.Context) (source.Stats, error) {
 	return source.Stats{}, nil
 }
@@ -45,7 +50,7 @@ func (stubSource) Status(context.Context) source.Status {
 func TestRouterRecordsChiRoutePattern(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	m := metrics.New()
-	h := router(stubSource{}, log, m, nil)
+	h := router(stubSource{}, log, m, config.Config{}, nil)
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/events/0000000100-0000000001", nil))
@@ -73,7 +78,7 @@ func TestRouterConcurrentCallsDoNotRace(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			m := metrics.New()
-			h := router(stubSource{}, log, m, nil)
+			h := router(stubSource{}, log, m, config.Config{}, nil)
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/livez", nil))
 			assert.Equal(t, http.StatusOK, rec.Code)

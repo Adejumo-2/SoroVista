@@ -233,8 +233,10 @@ func router(src source.EventSource, log *slog.Logger, m *metrics.Metrics, cfg co
 	}
 
 	r := chi.NewRouter()
-	r.Use(middleware.Recoverer, reqid.Middleware, requestLogger(log))
-	r.Use(api.CORSMiddleware(api.CORSConfig{Origins: corsOrigins}))
+	// Tracing runs after reqid so the inbound span can carry the request ID,
+	// which is what lets a trace and a log line be joined.
+	r.Use(middleware.Recoverer, reqid.Middleware, tracer.Middleware, requestLogger(log))
+	r.Use(api.CORSMiddleware(api.CORSConfig{Origins: cfg.CORSAllowedOrigins}))
 	// WithRoutePattern resolves the matched chi pattern (e.g. "/api/events/{id}"),
 	// not the raw path, keeping metric label cardinality bounded.
 	m.WithRoutePattern(func(req *http.Request) string {
