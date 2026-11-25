@@ -1,4 +1,4 @@
-.PHONY: build run vet test test-db lint fmt ci up down clean
+.PHONY: build run vet test test-race test-db lint fmt ci up down clean
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
@@ -18,6 +18,9 @@ test:
 		echo "note: TEST_DATABASE_URL is unset; the Postgres integration tests in internal/store will skip (run make up then make test-db for the database pass)"; \
 	fi
 	go test ./...
+
+test-race:
+	go test -race ./...
 
 # Run every test including the Postgres integration tests, against the
 # docker-compose database (make up first, or point at your own Postgres).
