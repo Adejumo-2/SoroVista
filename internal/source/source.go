@@ -125,6 +125,12 @@ type EventQuery struct {
 	Topic      json.RawMessage
 	FromLedger int64 // inclusive
 	ToLedger   int64 // inclusive
+	// FromTime and ToTime bound events by their on-chain ledger close time
+	// (not ingest time). Both are inclusive at the lower bound and exclusive
+	// at the upper bound, matching the half-open convention of the buckets
+	// API. Zero means no bound.
+	FromTime time.Time
+	ToTime   time.Time
 	// Cursor continues a previous page. It is opaque: only the implementation
 	// that produced it may interpret it.
 	Cursor string
